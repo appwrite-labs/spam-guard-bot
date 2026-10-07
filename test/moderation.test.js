@@ -4,17 +4,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import { createMessageHandler } from "../src/moderation.js";
 import {
   buildVisualReferenceMatcher,
   loadVisualReferenceManifest,
   writeVisualReferenceManifest,
 } from "../src/visual-matching.js";
-import {
-  buildEasterEggMatcher,
-  loadEasterEggPhotoManifest,
-  writeEasterEggPhotoManifest,
-} from "../src/easter-egg-matching.js";
 
 function createHorizontalGradient(width, height, reversed = false) {
   const pixels = Buffer.alloc(width * height * 3);
@@ -64,102 +60,121 @@ function createImageFetchResponse(buffer) {
   };
 }
 
+function testConfig(overrides = {}) {
+  return { ...DEFAULT_CONFIG, moderationChannelId: "moderation-channel", ...overrides };
+}
+
+function createModerationClient(extra = {}) {
+  const sent = [];
+  const fetchedChannelIds = [];
+  return {
+    sent,
+    fetchedChannelIds,
+    channels: {
+      fetch: async (channelId) => {
+        fetchedChannelIds.push(channelId);
+        return {
+          isTextBased: () => true,
+          isSendable: () => true,
+          send: async (payload) => sent.push(payload),
+        };
+      },
+    },
+    ...extra,
+  };
+}
+
 function imageUrl(name) {
   return `https://cdn.discordapp.com/attachments/${name}.png`;
 }
 
-test("moderates and posts a fallback notice when no moderation channel is configured", async () => {
-  const originalFetch = globalThis.fetch;
-  const imageBuffer = await createHorizontalGradient(32, 32);
-  globalThis.fetch = async () => createImageFetchResponse(imageBuffer);
+for (const feedbackChannelId of [null, "123456789012345678"]) {
+  test(`alerts the moderation channel only (feedback channel ${feedbackChannelId ? "set" : "unset"})`, async () => {
+    const originalFetch = globalThis.fetch;
+    const imageBuffer = await createHorizontalGradient(32, 32);
+    globalThis.fetch = async () => createImageFetchResponse(imageBuffer);
 
-  try {
-    const channelMessages = [];
-    const message = {
-      id: "message-1",
-      guildId: "guild-1",
-      channelId: "channel-1",
-      author: {
-        id: "user-1",
-        tag: "tester#0001",
-        bot: false,
-        displayAvatarURL: () => "https://example.com/avatar.png",
-        toString: () => "<@user-1>",
-      },
-      channel: {
-        isTextBased: () => true,
-        isSendable: () => true,
-        send: async (payload) => {
-          channelMessages.push(payload);
+    try {
+      const channelMessages = [];
+      let deleted = 0;
+      const message = {
+        id: "message-1",
+        guildId: "guild-1",
+        channelId: "channel-1",
+        author: {
+          id: "user-1",
+          tag: "tester#0001",
+          bot: false,
+          displayAvatarURL: () => "https://example.com/avatar.png",
+          toString: () => "<@user-1>",
         },
-      },
-      guild: {
-        preferredLocale: "es-ES",
-        ownerId: "owner-1",
-      },
-      attachments: new Map([
-        [
-          "attachment-1",
-          {
-            id: "attachment-1",
-            name: "proof.png",
-            contentType: "image/png",
-            size: imageBuffer.length,
-            url: imageUrl("proof"),
+        channel: {
+          isTextBased: () => true,
+          isSendable: () => true,
+          send: async (payload) => {
+            channelMessages.push(payload);
           },
-        ],
-      ]),
-      embeds: [],
-      messageSnapshots: new Map(),
-      member: {
-        moderatable: true,
-        permissions: {
-          has: () => false,
         },
-        timeout: async () => {},
-      },
-      delete: async () => {},
-      webhookId: null,
-      inGuild: () => true,
-    };
+        guild: {
+          preferredLocale: "en-US",
+          ownerId: "owner-1",
+        },
+        attachments: new Map([
+          [
+            "attachment-1",
+            {
+              id: "attachment-1",
+              name: "proof.png",
+              contentType: "image/png",
+              size: imageBuffer.length,
+              url: imageUrl("proof"),
+            },
+          ],
+        ]),
+        embeds: [],
+        messageSnapshots: new Map(),
+        member: {
+          moderatable: true,
+          permissions: {
+            has: () => false,
+          },
+          timeout: async () => {},
+        },
+        delete: async () => {
+          deleted += 1;
+        },
+        webhookId: null,
+        inGuild: () => true,
+      };
+      const client = createModerationClient();
 
-    const handleMessage = createMessageHandler({
-      client: {},
-      config: {
-        maxImageBytes: 1024,
-        maxImagePixels: 16_000_000,
-        imageDownloadTimeoutMs: 1000,
-        timeoutMs: 60_000,
-      },
-      ocrService: {
-        recognize: async () => "Withdrawal\nSucceeded",
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
-      },
-    });
+      const handleMessage = createMessageHandler({
+        client,
+        config: testConfig({
+          maxImageBytes: 1024,
+          imageDownloadTimeoutMs: 1000,
+          timeoutMs: 60_000,
+          feedbackChannelId,
+        }),
+        ocrService: {
+          recognize: async () => "Withdrawal\nSucceeded",
+        },
+      });
 
-    await handleMessage(message);
+      await handleMessage(message);
 
-    assert.equal(channelMessages.length, 1);
-    assert.match(channelMessages[0].content, /Mensaje borrado: <@user-1>/);
-    assert.match(
-      channelMessages[0].content,
-      /configura un canal de moderación en `\/setup panel`/,
-    );
-    assert.deepEqual(channelMessages[0].allowedMentions, {
-      users: ["user-1"],
-      roles: [],
-      repliedUser: false,
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
+      assert.equal(deleted, 1);
+      assert.equal(channelMessages.length, 0);
+      assert.deepEqual(client.fetchedChannelIds, ["moderation-channel"]);
+      assert.equal(client.sent.length, 1);
+      assert.match(client.sent[0].content, /^Moderation alert: tester/);
+      assert.deepEqual(client.sent[0].allowedMentions, { parse: [] });
+      assert.equal(Boolean(client.sent[0].components), Boolean(feedbackChannelId));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
 
 test("checks malicious image domains with the low paranoia OCR pass", async () => {
   const originalFetch = globalThis.fetch;
@@ -218,24 +233,18 @@ test("checks malicious image domains with the low paranoia OCR pass", async () =
 
     const handleMessage = createMessageHandler({
       client: {},
-      config: {
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        imageScanSensitivity: "low",
+      }),
       ocrService: {
         recognize: async (_image, options) => {
           ocrOptions = options;
           return "Visit wenowin.com";
         },
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "low",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
       },
     });
 
@@ -284,30 +293,23 @@ test("blocks a listed spam message without requiring an image", async () => {
     inGuild: () => true,
   };
 
+  const client = createModerationClient();
   const handleMessage = createMessageHandler({
-    client: {},
-    config: { timeoutMs: 60_000 },
+    client,
+    config: testConfig({ timeoutMs: 60_000, spamMessagesEnabled: true }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
 
   assert.equal(deleted, 1);
   assert.equal(timeoutCalls, 1);
-  assert.equal(channelMessages.length, 1);
-  assert.match(channelMessages[0].content, /Message deleted: <@user-spammer>/);
+  assert.equal(channelMessages.length, 0);
+  assert.equal(client.sent.length, 1);
+  assert.match(client.sent[0].content, /^Spam alert: spammer/);
 });
 
-test("ignores bot messages by default and detects them when enabled for the server", async () => {
-  let botDetectionEnabled = false;
+test("ignores bot messages by default and detects them when MODERATE_BOTS is on", async () => {
   let deleted = 0;
   let timeoutCalls = 0;
   const channelMessages = [];
@@ -341,31 +343,25 @@ test("ignores bot messages by default and detects them when enabled for the serv
     webhookId: null,
     inGuild: () => true,
   };
+  const client = createModerationClient();
+  const config = testConfig({ timeoutMs: 60_000 });
   const handleMessage = createMessageHandler({
-    client: {},
-    config: { timeoutMs: 60_000 },
+    client,
+    config,
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getBotDetection: () => ({ enabled: botDetectionEnabled }),
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
   assert.equal(deleted, 0);
   assert.equal(timeoutCalls, 0);
 
-  botDetectionEnabled = true;
+  config.moderateBots = true;
   await handleMessage(message);
 
   assert.equal(deleted, 1);
   assert.equal(timeoutCalls, 1);
-  assert.equal(channelMessages.length, 1);
+  assert.equal(channelMessages.length, 0);
+  assert.equal(client.sent.length, 1);
 });
 
 test("times out before deleting spam and removes its single-message thread", async () => {
@@ -416,16 +412,8 @@ test("times out before deleting spam and removes its single-message thread", asy
 
   const handleMessage = createMessageHandler({
     client: {},
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000, spamMessagesEnabled: true }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
@@ -457,7 +445,7 @@ test("detects a malicious forwarded image and moderates the outer message", asyn
         name: "scam.png",
         contentType: "image/png",
         size: 100,
-        url: "https://cdn.discordapp.com/attachments/740463504602955806/1540534318554677288/scam.png",
+        url: "https://cdn.discordapp.com/attachments/111111111111111111/1540534318554677288/scam.png",
       }],
     ]),
     embeds: [],
@@ -491,7 +479,7 @@ test("detects a malicious forwarded image and moderates the outer message", asyn
   try {
     const handleMessage = createMessageHandler({
       client: {},
-      config: { timeoutMs: 60_000 },
+      config: testConfig({ timeoutMs: 60_000, antiRaidEnabled: false, spamMessagesEnabled: false }),
       ocrService: {
         recognize: async () => {
           ocrCalls += 1;
@@ -503,15 +491,7 @@ test("detects a malicious forwarded image and moderates the outer message", asyn
           throw new Error("A prohibited source channel must skip visual matching.");
         },
       },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
-        getRaidProtection: () => ({ enabled: false }),
-        getSpamProtection: () => ({ enabled: false }),
-      },
+      scamImageChannels: [{ channelId: "111111111111111111", name: "Test scam channel" }],
     });
 
     await handleMessage(message);
@@ -590,27 +570,20 @@ test("deletes a forwarded image hash match without running OCR", async () => {
   try {
     const handleMessage = createMessageHandler({
       client: {},
-      config: {
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        antiRaidEnabled: false,
+        spamMessagesEnabled: false,
+      }),
       visualMatcher,
       ocrService: {
         recognize: async () => {
           ocrCalls += 1;
           return "";
         },
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
-        getRaidProtection: () => ({ enabled: false }),
-        getSpamProtection: () => ({ enabled: false }),
       },
     });
 
@@ -665,7 +638,7 @@ test("detects a malicious image sent in a recently created author-owned thread a
         name: "scam.png",
         contentType: "image/png",
         size: 100,
-        url: "https://cdn.discordapp.com/attachments/740463504602955806/1540534318554677288/scam.png",
+        url: "https://cdn.discordapp.com/attachments/111111111111111111/1540534318554677288/scam.png",
       }],
     ]),
     embeds: [],
@@ -682,17 +655,9 @@ test("detects a malicious image sent in a recently created author-owned thread a
 
   const handleMessage = createMessageHandler({
     client: {},
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000, antiRaidEnabled: false, spamMessagesEnabled: false }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getRaidProtection: () => ({ enabled: false }),
-      getSpamProtection: () => ({ enabled: false }),
-    },
+    scamImageChannels: [{ channelId: "111111111111111111", name: "Test scam channel" }],
   });
 
   await handleMessage(message);
@@ -756,19 +721,11 @@ test("anti-raid deletes a message starter and the thread it created", async () =
     raidMessage("raid-message-3", "raid-channel-3"),
   ];
 
+  const client = createModerationClient();
   const handleMessage = createMessageHandler({
-    client: {},
-    config: { timeoutMs: 60_000 },
+    client,
+    config: testConfig({ timeoutMs: 60_000, antiRaidLevel: "high", spamMessagesEnabled: false }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getRaidProtection: () => ({ enabled: true, level: "high" }),
-      getSpamProtection: () => ({ enabled: false }),
-    },
   });
 
   for (const message of messages) {
@@ -781,7 +738,10 @@ test("anti-raid deletes a message starter and the thread it created", async () =
     "raid-message-3",
   ]);
   assert.deepEqual(deletedThreads, ["started-thread"]);
-  assert.equal(channelMessages.length, 1);
+  assert.equal(channelMessages.length, 0);
+  assert.equal(client.sent.length, 1);
+  const timeoutField = client.sent[0].embeds[0].data.fields.find((field) => field.name.startsWith("Timeout"));
+  assert.equal(timeoutField.value, "Yes");
 });
 
 test("deletes malicious server invites, times out the author, and alerts moderators", async () => {
@@ -838,19 +798,9 @@ test("deletes malicious server invites, times out the author, and alerts moderat
       fetchInvite: async () => ({ guild: { id: "123456789012345678" } }),
       channels: { fetch: async () => moderationChannel },
     },
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000 }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => "moderation-channel",
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getMaliciousServerProtection: () => ({
-        enabled: true,
-        blockedGuildIds: ["123456789012345678"],
-      }),
-    },
+    maliciousGuildIds: ["123456789012345678"],
   });
 
   await handleMessage(message);
@@ -901,16 +851,9 @@ test("does not moderate malicious server invites when protection is disabled", a
 
   const handleMessage = createMessageHandler({
     client: { fetchInvite: async () => ({ guild: { id: "123456789012345678" } }) },
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000, maliciousInvitesEnabled: false }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getMaliciousServerProtection: () => ({ enabled: false, blockedGuildIds: ["123456789012345678"] }),
-    },
+    maliciousGuildIds: ["123456789012345678"],
   });
 
   await handleMessage(message);
@@ -987,12 +930,12 @@ test("resolves malicious Discord invites found inside image OCR", async () => {
           }),
         },
       },
-      config: {
+      config: testConfig({
         maxImageBytes: 4096,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+      }),
       ocrService: {
         recognize: async () => {
           ocrCalls += 1;
@@ -1000,14 +943,6 @@ test("resolves malicious Discord invites found inside image OCR", async () => {
         },
       },
       maliciousGuildIds: ["123456789012345678"],
-      settingsStore: {
-        getModerationChannelId: () => "moderation-channel",
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
-        getMaliciousServerProtection: () => ({ enabled: true, blockedGuildIds: [] }),
-      },
     });
 
     await handleMessage(message);
@@ -1117,30 +1052,20 @@ test("applies blocked-link, NSFW-invite, and malicious-invite filters to image O
             }),
           },
         },
-        config: {
+        config: testConfig({
           maxImageBytes: 4096,
           maxImagePixels: 16_000_000,
           imageDownloadTimeoutMs: 1000,
           timeoutMs: 60_000,
-        },
+          antiRaidEnabled: false,
+          spamMessagesEnabled: false,
+        }),
         ocrService: {
           singlePass: true,
           recognize: async () => testCase.ocrText,
         },
         maliciousGuildIds: ["123456789012345678"],
         nsfwServerKeywords: ["nsfw"],
-        settingsStore: {
-          getModerationChannelId: () => "moderation-channel",
-          getParanoiaLevel: () => "high",
-          getExcludedRoleIds: () => [],
-          getExcludedAdministrators: () => true,
-          getTimeoutMs: () => null,
-          getBlockedLinkProtection: () => ({ enabled: true }),
-          getMaliciousServerProtection: () => ({ enabled: true, blockedGuildIds: [] }),
-          getNsfwServerProtection: () => ({ enabled: true }),
-          getRaidProtection: () => ({ enabled: false }),
-          getSpamProtection: () => ({ enabled: false }),
-        },
       });
 
       await handleMessage(message);
@@ -1204,17 +1129,8 @@ test("blocks invites to servers with NSFW names and alerts moderators", async ()
         }),
       },
     },
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000 }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => "moderation-channel",
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getMaliciousServerProtection: () => ({ enabled: true, blockedGuildIds: [] }),
-      getNsfwServerProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
@@ -1268,16 +1184,12 @@ test("ignores listed spam messages from members with excluded roles", async () =
 
   const handleMessage = createMessageHandler({
     client: {},
-    config: { timeoutMs: 60_000 },
+    config: testConfig({
+      timeoutMs: 60_000,
+      excludedRoleIds: ["role-1"],
+      spamMessagesEnabled: true,
+    }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => ["role-1"],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
@@ -1324,16 +1236,8 @@ test("ignores listed spam messages from administrators when configured", async (
 
   const handleMessage = createMessageHandler({
     client: {},
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000, spamMessagesEnabled: true }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
@@ -1386,16 +1290,13 @@ test("respects spam protection and moderation settings", async () => {
 
   const handleMessage = createMessageHandler({
     client: { channels: { fetch: async () => moderationChannel } },
-    config: { timeoutMs: 60_000 },
+    config: testConfig({
+      timeoutMs: 60_000,
+      excludeAdmins: false,
+      timeoutMs: 15 * 60_000,
+      spamMessagesEnabled: true,
+    }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => "moderation-channel",
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => false,
-      getTimeoutMs: () => 15 * 60_000,
-      getSpamProtection: () => ({ enabled: true }),
-    },
   });
 
   await handleMessage(message);
@@ -1442,16 +1343,8 @@ test("does not moderate listed spam messages when spam protection is disabled", 
 
   const handleMessage = createMessageHandler({
     client: {},
-    config: { timeoutMs: 60_000 },
+    config: testConfig({ timeoutMs: 60_000, spamMessagesEnabled: false }),
     ocrService: { recognize: async () => "" },
-    settingsStore: {
-      getModerationChannelId: () => null,
-      getParanoiaLevel: () => "high",
-      getExcludedRoleIds: () => [],
-      getExcludedAdministrators: () => true,
-      getTimeoutMs: () => null,
-      getSpamProtection: () => ({ enabled: false }),
-    },
   });
 
   await handleMessage(message);
@@ -1544,27 +1437,21 @@ test("deletes the whole message when only one image matches", async () => {
       inGuild: () => true,
     };
 
+    const client = createModerationClient();
     const handleMessage = createMessageHandler({
-      client: {},
-      config: {
+      client,
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+      }),
       ocrService: {
         singlePass: true,
         recognize: async () => {
           ocrCalls += 1;
           return "nothing useful";
         },
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
       },
       visualMatcher,
     });
@@ -1573,117 +1460,8 @@ test("deletes the whole message when only one image matches", async () => {
 
     assert.equal(deleted, 1);
     assert.equal(ocrCalls, 1);
-    assert.equal(channelMessages.length, 1);
-    assert.match(channelMessages[0].content, /Message deleted: <@user-1>/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("replies publicly and skips moderation for an easter egg hash match", async () => {
-  const originalFetch = globalThis.fetch;
-  const imageBuffer = await createHorizontalGradient(32, 32);
-  globalThis.fetch = async () => createImageFetchResponse(imageBuffer);
-
-  try {
-    const tempDirectory = await mkdtemp(join(tmpdir(), "easter-egg-handler-"));
-    const referencePath = join(tempDirectory, "meme.png");
-    await sharp(imageBuffer).toFile(referencePath);
-    const manifestPath = join(tempDirectory, "manifest.json");
-    await writeEasterEggPhotoManifest(tempDirectory, manifestPath);
-    const references = await loadEasterEggPhotoManifest(manifestPath);
-    const easterEggMatcher = await buildEasterEggMatcher(references, 0);
-
-    let deleted = 0;
-    let timeoutCalls = 0;
-    const channelMessages = [];
-    const replies = [];
-    const message = {
-      id: "message-easter-egg",
-      guildId: "guild-1",
-      channelId: "channel-1",
-      author: {
-        id: "user-egg",
-        tag: "egg#0001",
-        bot: false,
-        displayAvatarURL: () => "https://example.com/avatar.png",
-        toString: () => "<@user-egg>",
-      },
-      channel: {
-        isTextBased: () => true,
-        isSendable: () => true,
-        send: async (payload) => {
-          channelMessages.push(payload);
-        },
-      },
-      reply: async (payload) => {
-        replies.push(payload);
-      },
-      guild: {
-        preferredLocale: "es-ES",
-        ownerId: "owner-1",
-      },
-      attachments: new Map([
-        [
-          "attachment-1",
-          {
-            id: "attachment-1",
-            name: "meme.png",
-            contentType: "image/png",
-            size: imageBuffer.length,
-            url: imageUrl("meme"),
-          },
-        ],
-      ]),
-      embeds: [],
-      messageSnapshots: new Map(),
-      member: {
-        moderatable: true,
-        permissions: {
-          has: () => false,
-        },
-        timeout: async () => {
-          timeoutCalls += 1;
-        },
-      },
-      delete: async () => {
-        deleted += 1;
-      },
-      webhookId: null,
-      inGuild: () => true,
-    };
-
-    const handleMessage = createMessageHandler({
-      client: {},
-      config: {
-        maxImageBytes: 1024,
-        maxImagePixels: 16_000_000,
-        imageDownloadTimeoutMs: 1000,
-        timeoutMs: 60_000,
-      },
-      ocrService: {
-        recognize: async () => "nothing useful",
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
-      },
-      easterEggMatcher,
-    });
-
-    await handleMessage(message);
-
-    assert.equal(replies.length, 1);
-    assert.equal(replies[0].content, "Jajaja, piqué.");
-    assert.deepEqual(replies[0].allowedMentions, {
-      repliedUser: false,
-    });
-    assert.equal(deleted, 0);
-    assert.equal(timeoutCalls, 0);
     assert.equal(channelMessages.length, 0);
+    assert.equal(client.sent.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1755,24 +1533,17 @@ test("ignores guild administrators", async () => {
 
     const handleMessage = createMessageHandler({
       client: {},
-      config: {
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+      }),
       ocrService: {
         recognize: async () => {
           ocrCalls += 1;
           return "Withdrawal\nSucceeded";
         },
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
       },
     });
 
@@ -1847,23 +1618,18 @@ test("moderates guild administrators when administrator exclusion is disabled", 
       inGuild: () => true,
     };
 
+    const client = createModerationClient();
     const handleMessage = createMessageHandler({
-      client: {},
-      config: {
+      client,
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        excludeAdmins: false,
+      }),
       ocrService: {
         recognize: async () => "Withdrawal\nSucceeded",
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => false,
-        getTimeoutMs: () => null,
       },
     });
 
@@ -1871,7 +1637,8 @@ test("moderates guild administrators when administrator exclusion is disabled", 
 
     assert.equal(deleted, 1);
     assert.equal(timeoutValue, 60_000);
-    assert.equal(channelMessages.length, 1);
+    assert.equal(channelMessages.length, 0);
+    assert.equal(client.sent.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1938,23 +1705,18 @@ test("moderates the guild owner when administrator exclusion is disabled", async
       inGuild: () => true,
     };
 
+    const client = createModerationClient();
     const handleMessage = createMessageHandler({
-      client: {},
-      config: {
+      client,
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        excludeAdmins: false,
+      }),
       ocrService: {
         recognize: async () => "Withdrawal\nSucceeded",
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => false,
-        getTimeoutMs: () => null,
       },
     });
 
@@ -1962,7 +1724,8 @@ test("moderates the guild owner when administrator exclusion is disabled", async
 
     assert.equal(deleted, 1);
     assert.equal(timeoutValue, 60_000);
-    assert.equal(channelMessages.length, 1);
+    assert.equal(channelMessages.length, 0);
+    assert.equal(client.sent.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2029,24 +1792,18 @@ test("ignores members with excluded roles", async () => {
 
     const handleMessage = createMessageHandler({
       client: {},
-      config: {
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        excludedRoleIds: ["role-1"],
+      }),
       ocrService: {
         recognize: async () => {
           ocrCalls += 1;
           return "Withdrawal\nSucceeded";
         },
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => ["role-1"],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => null,
       },
     });
 
@@ -2116,21 +1873,15 @@ test("uses the server timeout setting when timing out a user", async () => {
 
     const handleMessage = createMessageHandler({
       client: {},
-      config: {
+      config: testConfig({
         maxImageBytes: 1024,
         maxImagePixels: 16_000_000,
         imageDownloadTimeoutMs: 1000,
         timeoutMs: 60_000,
-      },
+        timeoutMs: 15 * 60_000,
+      }),
       ocrService: {
         recognize: async () => "Withdrawal\nSucceeded",
-      },
-      settingsStore: {
-        getModerationChannelId: () => null,
-        getParanoiaLevel: () => "high",
-        getExcludedRoleIds: () => [],
-        getExcludedAdministrators: () => true,
-        getTimeoutMs: () => 15 * 60_000,
       },
     });
 
@@ -2140,4 +1891,106 @@ test("uses the server timeout setting when timing out a user", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+function createTextMessage({ id, authorId, content }) {
+  const events = { deleted: 0, timeouts: 0 };
+  const message = {
+    id,
+    guildId: "guild-1",
+    channelId: "channel-1",
+    content,
+    author: {
+      id: authorId,
+      tag: `${authorId}#0001`,
+      bot: false,
+      displayAvatarURL: () => "https://example.com/avatar.png",
+      toString: () => `<@${authorId}>`,
+    },
+    channel: {
+      isTextBased: () => true,
+      isSendable: () => true,
+      send: async () => {},
+    },
+    guild: { preferredLocale: "en-US", ownerId: "owner-1" },
+    attachments: new Map(),
+    embeds: [],
+    messageSnapshots: new Map(),
+    member: {
+      moderatable: true,
+      permissions: { has: () => false },
+      timeout: async () => { events.timeouts += 1; },
+    },
+    delete: async () => { events.deleted += 1; },
+    webhookId: null,
+    inGuild: () => true,
+  };
+  return { message, events };
+}
+
+test("TEXT_SCAM_ENABLED switches hiring-ad detection on and off", async () => {
+  for (const textScamEnabled of [true, false]) {
+    const { message, events } = createTextMessage({
+      id: `hiring-${textScamEnabled}`,
+      authorId: "recruiter",
+      content: "We're hiring a senior React developer for a paid long-term project. DM me your portfolio.",
+    });
+    const client = createModerationClient();
+    const handleMessage = createMessageHandler({
+      client,
+      config: testConfig({ textScamEnabled }),
+      ocrService: { recognize: async () => "" },
+    });
+
+    await handleMessage(message);
+
+    assert.equal(events.deleted, textScamEnabled ? 1 : 0);
+    assert.equal(events.timeouts, textScamEnabled ? 1 : 0);
+    assert.equal(client.sent.length, textScamEnabled ? 1 : 0);
+  }
+});
+
+test("known spammer IDs are only enforced while SPAM_MESSAGES_ENABLED is on", async () => {
+  for (const spamMessagesEnabled of [true, false]) {
+    const { message, events } = createTextMessage({
+      id: `known-spammer-${spamMessagesEnabled}`,
+      // Listed in spam-users.json.
+      authorId: "1537410283688169583",
+      content: "hello there",
+    });
+    const handleMessage = createMessageHandler({
+      client: createModerationClient(),
+      config: testConfig({ spamMessagesEnabled }),
+      ocrService: { recognize: async () => "" },
+    });
+
+    await handleMessage(message);
+
+    assert.equal(events.deleted, spamMessagesEnabled ? 1 : 0);
+  }
+});
+
+test("acts once when Discord sends an update while the message is still being handled", async () => {
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const { message, events } = createTextMessage({
+    id: "link-spam",
+    authorId: "link-spammer",
+    content: "free bonus https://wenowin.com/promo",
+  });
+  message.member.timeout = async () => { await delay(30); events.timeouts += 1; };
+  message.delete = async () => { await delay(30); events.deleted += 1; };
+  const client = createModerationClient();
+  const handleMessage = createMessageHandler({
+    client,
+    config: testConfig(),
+    ocrService: { recognize: async () => "" },
+  });
+
+  // MessageCreate, then MessageUpdate (link preview added) for the same message.
+  await Promise.all([handleMessage(message), delay(10).then(() => handleMessage(message))]);
+  await handleMessage(message);
+
+  assert.equal(events.timeouts, 1);
+  assert.equal(events.deleted, 1);
+  assert.equal(client.sent.length, 1);
 });

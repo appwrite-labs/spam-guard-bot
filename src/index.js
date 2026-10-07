@@ -1,11 +1,11 @@
 import "dotenv/config";
-import { resolve } from "node:path";
 import {
   ActivityType,
   Client,
   Events,
   GatewayIntentBits,
   MessageFlags,
+  PermissionFlagsBits,
 } from "discord.js";
 import { loadConfig } from "./config.js";
 import { createMessageHandler } from "./moderation.js";
@@ -13,33 +13,21 @@ import { MALICIOUS_GUILD_IDS } from "./malicious-servers.js";
 import { NSFW_SERVER_KEYWORDS } from "./nsfw-servers.js";
 import { resolveLocale, t } from "./i18n.js";
 import { OcrService } from "./ocr.js";
-import { SettingsStore } from "./settings-store.js";
 import {
   buildVisualReferenceMatcher,
   loadVisualReferenceManifest,
 } from "./visual-matching.js";
-import {
-  buildEasterEggMatcher,
-  loadEasterEggPhotoManifest,
-} from "./easter-egg-matching.js";
-import {
-  createSetupCommandHandler,
-  registerSetupCommandForGuild,
-  registerSetupCommands,
-} from "./setup-command.js";
 import { handleDetectionFeedback } from "./detection-feedback.js";
 import { handleSpamReportMessage } from "./spam-report.js";
-import { AnalyticsStore } from "./analytics.js";
+
+const REQUIRED_CHANNEL_PERMISSIONS = [
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.EmbedLinks,
+];
 
 const config = loadConfig();
 const ocrService = new OcrService();
-const settingsStore = new SettingsStore(resolve("data/settings.json"));
-const analyticsStore = new AnalyticsStore(
-  resolve("data/analytics.json"),
-  config.sendFeedback,
-);
-await settingsStore.load();
-await analyticsStore.load();
 
 const visualReferenceHashes = await loadVisualReferenceManifest(
   config.visualReferenceManifestPath,
@@ -49,36 +37,17 @@ const visualMatcher = visualReferenceHashes.length > 0
       visualReferenceHashes,
       config.visualMatchThreshold,
       { maxImagePixels: config.maxImagePixels },
-  )
-  : null;
-const easterEggReferences = await loadEasterEggPhotoManifest(
-  config.easterEggPhotoManifestPath,
-);
-const easterEggMatcher = easterEggReferences.length > 0
-  ? await buildEasterEggMatcher(
-      easterEggReferences,
-      0,
-      { maxImagePixels: config.maxImagePixels },
     )
   : null;
 
 if (visualReferenceHashes.length === 0) {
   console.warn(
-    `[Visual matching] No reference hashes found at ${config.visualReferenceManifestPath}.`,
-  );
-} else if (visualReferenceHashes.length > 0) {
-  console.log(
-    `[Visual matching] Loaded ${visualReferenceHashes.length} reference hash(es).`,
-  );
-}
-
-if (easterEggReferences.length === 0) {
-  console.warn(
-    `[Easter eggs] No hash signatures found at ${config.easterEggPhotoManifestPath}.`,
+    `[Visual matching] No reference hashes found at ${config.visualReferenceManifestPath}. ` +
+      `Run "pnpm build:visual-references".`,
   );
 } else {
   console.log(
-    `[Easter eggs] Loaded ${easterEggReferences.length} hash signature(s).`,
+    `[Visual matching] Loaded ${visualReferenceHashes.length} reference hash(es).`,
   );
 }
 
@@ -93,18 +62,37 @@ const handleMessage = createMessageHandler({
   client,
   config,
   ocrService,
-  settingsStore,
   visualMatcher,
-  easterEggMatcher,
   maliciousGuildIds: MALICIOUS_GUILD_IDS,
   nsfwServerKeywords: NSFW_SERVER_KEYWORDS,
-  analytics: analyticsStore,
 });
-const handleSetupCommand = createSetupCommandHandler({
-  settingsStore,
-  config,
-  analytics: analyticsStore,
-});
+
+// The bot only moderates the server that owns MODERATION_CHANNEL_ID, so
+// alerts never mix content from another server. Set once the client is ready.
+let moderatedGuildId = null;
+
+async function resolveAlertChannel(name, channelId) {
+  let channel;
+
+  try {
+    channel = await client.channels.fetch(channelId);
+  } catch (error) {
+    throw new Error(`${name} ${channelId} could not be fetched: ${error.message}`);
+  }
+
+  if (!channel?.isTextBased() || !channel.isSendable() || !channel.guild) {
+    throw new Error(`${name} ${channelId} is not a server text channel.`);
+  }
+
+  const botMember = channel.guild.members.me ?? await channel.guild.members.fetchMe();
+  if (!channel.permissionsFor(botMember)?.has(REQUIRED_CHANNEL_PERMISSIONS)) {
+    throw new Error(
+      `${name} ${channelId}: the bot needs View Channel, Send Messages, and Embed Links in #${channel.name}.`,
+    );
+  }
+
+  return channel;
+}
 
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Bot connected as ${readyClient.user.tag}.`);
@@ -114,24 +102,39 @@ client.once(Events.ClientReady, async (readyClient) => {
   });
 
   try {
-    await registerSetupCommands(readyClient);
-    console.log("Setup commands registered.");
+    const moderationChannel = await resolveAlertChannel(
+      "MODERATION_CHANNEL_ID",
+      config.moderationChannelId,
+    );
+    if (config.feedbackChannelId) {
+      await resolveAlertChannel("FEEDBACK_CHANNEL_ID", config.feedbackChannelId);
+    }
+
+    moderatedGuildId = moderationChannel.guild.id;
+    console.log(
+      `Moderating "${moderationChannel.guild.name}" (${moderatedGuildId}). ` +
+        `Alerts go to #${moderationChannel.name}.`,
+    );
+
+    // A mistyped role ID means that role's members are moderated like anyone else.
+    const roles = moderationChannel.guild.roles.cache;
+    for (const roleId of config.excludedRoleIds) {
+      if (roles.has(roleId)) {
+        console.log(`[Startup] Excluded role: @${roles.get(roleId).name} (${roleId}).`);
+      } else {
+        console.warn(`[Startup] EXCLUDED_ROLE_IDS: role ${roleId} does not exist in this server.`);
+      }
+    }
   } catch (error) {
-    console.error("[Discord] Could not register setup commands:", error);
+    console.error(`[Startup] ${error.message}`);
+    await shutdown("startup check failure", 1);
   }
 });
 
-client.on(Events.GuildCreate, (guild) => {
-  void registerSetupCommandForGuild(guild).catch((error) => {
-    console.error(
-      `[Discord] Could not register setup commands in guild ${guild.id}:`,
-      error,
-    );
-  });
-});
-
 client.on(Events.MessageCreate, (message) => {
-  void handleSpamReportMessage(message, config, analyticsStore).catch((error) => console.error("[Spam report] Failed:", error));
+  if (!moderatedGuildId || message.guildId !== moderatedGuildId) return;
+
+  void handleSpamReportMessage(message, config).catch((error) => console.error("[Spam report] Failed:", error));
   void handleMessage(message).catch((error) => {
     console.error(
       `[Moderation] Failed to process message ${message.id}:`,
@@ -141,6 +144,8 @@ client.on(Events.MessageCreate, (message) => {
 });
 
 client.on(Events.MessageUpdate, (_oldMessage, newMessage) => {
+  if (!moderatedGuildId || newMessage.guildId !== moderatedGuildId) return;
+
   void handleMessage(newMessage).catch((error) => {
     console.error(
       `[Moderation] Failed to process updated message ${newMessage.id}:`,
@@ -150,27 +155,15 @@ client.on(Events.MessageUpdate, (_oldMessage, newMessage) => {
 });
 
 client.on(Events.InteractionCreate, (interaction) => {
-  if (interaction.isButton() && interaction.customId.startsWith("detection-feedback:")) {
-    void handleDetectionFeedback(interaction, config, analyticsStore).catch((error) => {
-      console.error("[Detection feedback] Failed to process feedback:", error);
-      if (!interaction.replied && !interaction.deferred) {
-        void interaction.reply({ content: "No se pudo enviar el feedback.", ephemeral: true });
-      }
-    });
-    return;
-  }
-  void handleSetupCommand(interaction).catch((error) => {
-    console.error("[Discord] Failed to process setup command:", error);
+  if (!interaction.isButton() || !interaction.customId.startsWith("detection-feedback:")) return;
 
-    const response = {
-      content: t(resolveLocale(interaction), "setup", "configError"),
-      flags: MessageFlags.Ephemeral,
-    };
-
-    if (interaction.replied || interaction.deferred) {
-      void interaction.followUp(response);
-    } else if (interaction.isRepliable()) {
-      void interaction.reply(response);
+  void handleDetectionFeedback(interaction, config).catch((error) => {
+    console.error("[Detection feedback] Failed to process feedback:", error);
+    if (!interaction.replied && !interaction.deferred) {
+      void interaction.reply({
+        content: t(resolveLocale(interaction), "moderation", "feedbackFailed"),
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
     }
   });
 });
@@ -179,12 +172,11 @@ client.on(Events.Error, (error) => {
   console.error("[Discord] Client error:", error);
 });
 
-async function shutdown(signal) {
-  console.log(`Received ${signal}. Shutting down...`);
-  client.destroy();
-  await analyticsStore.flush();
+async function shutdown(reason, exitCode = 0) {
+  console.log(`Shutting down (${reason})...`);
+  await client.destroy();
   await ocrService.terminate();
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));

@@ -1,15 +1,14 @@
 {
-  "name": "d5-spam-guard-bot",
+  "name": "spam-guard-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Discord bot that moderates fake successful withdrawal images.",
+  "description": "Discord bot that removes scam images, scam links, and spam from a Discord server.",
   "type": "module",
   "main": "src/index.js",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build:visual-references": "node scripts/build-visual-reference-manifest.mjs",
-    "build:easter-egg-photos": "node scripts/build-easter-egg-photo-manifest.mjs",
-    "prestart": "pnpm build:visual-references && pnpm build:easter-egg-photos",
+    "prestart": "pnpm build:visual-references",
     "start": "node src/index.js",
     "test": "node --test"
   },

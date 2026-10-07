@@ -1,609 +1,317 @@
-# D5 spam guard bot
+# Spam guard bot
 
-A Node.js Discord bot that uses OCR and image hashing to analyze attached images and images shown
-in Discord link previews. When an image contains a withdrawal keyword and a
-payout keyword, the bot:
+A Discord bot that removes scam images, scam links, malicious invites, hiring
+spam, and raids from one Discord server. When a message matches a rule, the bot:
 
-1. Deletes the message.
-2. Applies a timeout to the author.
-3. Sends a report to the moderation channel.
+1. Times out the author.
+2. Deletes the message (and a thread the author started from it).
+3. Posts an alert in the moderation channel with the author, the channel, the
+   message or the text read from the image, and the rule that matched.
 
-Invite the bot to your server:
+All settings come from environment variables. The bot has no database. While
+running, it writes nothing to disk except its OCR model cache.
 
-[Discord OAuth2 invite](https://discord.com/oauth2/authorize?client_id=1517463038465282179)
+## What leaves the server
 
-## Detection rules
-
-The OCR result must contain both of these keyword groups:
-
-- Withdrawal group: `Withdrawal`.
-- Payout group: `Success`, `Succeeded`, `Successful`, `Successfully`, or `USDT` in uppercase.
-
-The keywords:
-
-- Are case-insensitive.
-- Can appear in any order.
-- Can appear on different lines or far apart in the image.
-- Must appear as complete words.
-
-The OCR also checks the domains listed in
-[`blocked-domains.json`](blocked-domains.json). A match in that list is
-sufficient to detect the image at every paranoia level, including `low`. At
-that level the bot runs only the low-cost OCR pass for this check. The same
-list is also used for blocked domains in regular message text, with or without
-a URL protocol.
-
-You can tune the detection sensitivity per server with `/setup paranoia`:
-
-- `low` - exact visual hash match or a domain from the blocked domain list.
-- `medium` - visual hash match or OCR text containing `Withdrawal`, `Succeeded`, and `USDT`.
-- `high` - visual hash match or OCR text containing `Withdrawal` and either `Succeeded` or `USDT`.
-
-The default paranoia level is `high`.
-
-The blocked domain list is copied into the Docker image. Rebuild and redeploy
-the image after changing it.
-
-## Known scam-image source channels
-
-The bot also checks the source channel embedded in Discord attachment URLs
-(`.../attachments/<channel_id>/...`). The current list is maintained in
-[`scam-image-channels.json`](scam-image-channels.json) and contains the channel
-ID observed as a repeated source of MrBeast scam images:
-
-| Channel ID | Description |
+| Destination | What and why |
 | --- | --- |
-| `740463504602955806` | MrBeast scam images |
+| Discord API | Normal bot traffic: receiving messages, deleting, timing out, posting alerts, resolving invite links. |
+| Discord CDN | Downloads attached and embedded images to scan them. Only Discord image hosts are allowed. |
+| huggingface.co (github.com as fallback) | On first start, downloads about 30 MB of OCR model files. Download only; nothing is uploaded. |
 
-An image from a listed channel is blocked and the moderation alert identifies
-the source channel. Forwarded images are also sent through OCR before this
-fallback signal is applied. This signal only works when Discord preserves
-the original attachment URL; a re-uploaded image receives a new channel ID and
-still relies on visual matching or OCR.
+Alerts and feedback reports only go to channels you configure.
 
-## Anti-raid protection
+## Setup
 
-The bot includes an anti-raid protection that detects when a user sends the
-same message in multiple text channels within less than one minute. When a
-raid is detected, the bot:
+Every step below is required unless it says optional.
 
-1. Deletes the repeated messages in the affected channels.
-2. Applies the configured timeout to the user.
-3. Sends an alert to the moderation channel, including the deleted message.
+### 1. Create the Discord application
 
-Anti-raid is enabled by default at the `high` level. Configure it per server
-with `/setup anti-raid`, for example:
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
+   and create an application.
+2. On the **Bot** page:
+   - Select **Reset Token** and copy the token. This is `DISCORD_TOKEN`.
+   - Turn **off** **Public Bot**. Only the application's owner (or its
+     developer team) can then add the bot to a server.
+   - Under **Privileged Gateway Intents**, turn **on** **Message Content
+     Intent**. Without it the bot cannot read message text.
+3. Copy the **Application ID** from the **General Information** page.
 
-```text
-/setup anti-raid enabled:true level:high
-```
+### 2. Add the bot to the server
 
-Spam message protection is enabled by default. A matching spam message is
-deleted and its author is timed out. Known spammer IDs can be added to
-`spam-users.json`; messages from those users are handled the same way even if
-their message does not match a configured spam phrase.
-
-Available levels are:
-
-- `high` - triggers when the same message is sent in 3 or more channels.
-- `medium` - triggers when the same message is sent in 4 or more channels.
-- `low` - triggers only when the same message is sent in every text channel in
-  the server.
-
-## Spam message protection
-
-The bot can also block text messages or embed descriptions that contain an
-entry from the list in `spam-messages.json`. Matching ignores capitalization,
-accents, and repeated spaces. Matching messages are deleted, the author is
-timed out, and a moderation alert is sent when a moderation channel is
-configured.
-
-Spam protection is enabled by default. Server administrators can toggle it with:
+Open this URL with your application ID filled in, and pick the server:
 
 ```text
-/setup spam messages enabled:false
-/setup spam messages enabled:true
+https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=bot&permissions=1116691622912
 ```
 
-Add or remove entries directly in the `messages` array in `spam-messages.json`,
-one message or phrase per JSON array entry. Multi-line messages can be pasted
-with their line breaks as-is; the bot accepts and normalizes those line breaks
-when it loads the file. The `descriptionPatterns` entries are regular
-expressions for promotional descriptions. They are ignored when a
-`descriptionExclusions` expression detects a negation such as `no NSFW` or
-`NSFW not allowed`. Its status is also shown by `/setup status`.
+That permission number grants exactly what the bot uses:
 
-Use `enabled:false` to disable the protection. The anti-raid configuration is
-stored separately for each server and is shown by `/setup status`.
-
-## Blocked link protection
-
-The bot blocks these links by default. Administrators can toggle the
-protection per server:
-
-```text
-/setup blocked-link enabled:false
-/setup blocked-link enabled:true
-```
-
-`https://surveybuilder.io/c/capture/MHNKQThUS3A`
-`https://www.upwork.com/freelancers/~011c10fca307bf0e02?mp_source=share`
-`https://agentrouter.org/register?aff=QaiK`
-
-También se pueden bloquear dominios completos, incluidos sus subdominios. El
-listado global está en [blocked-domains.json](blocked-domains.json). Incluye
-`zangi.com` y los dominios maliciosos detectados por OCR en imágenes.
-
-## Manual spam reports
-
-Moderators can report a repeated message by replying to it with:
-
-```text
-`!spamreport`
-```
-
-The bot applies a timeout and removes matching messages from the user across
-the server's accessible text channels.
-
-## Global and per-server analytics
-
-Administrators and moderators can view statistics for the current server or
-combined statistics across all servers where the bot is installed:
-
-```text
-/spam analytics
-/spam global
-```
-
-The bot stores a global aggregate and separate counters for each server ID.
-Both include detections, manual spam reports, and feedback votes. They do not
-store user, message, image, URL, or OCR information. Historical global counters
-collected before per-server statistics were introduced remain in the global
-totals and cannot be attributed to an individual server.
-`SEND_FEEDBACK=false` disables both collection and display of these statistics.
-
-## Malicious server invite protection
-
-The bot can resolve Discord invitation links and compare the destination
-server ID with a blocklist. This protection is enabled by default.
-When a message contains an invitation to a blocked server, the bot deletes the
-message, applies the configured timeout to the author, and sends a moderation
-alert. A new invite link to the same server is still blocked because matching
-uses the destination server ID, not the invite code.
-
-The same check is also applied to invitation links recognized by OCR inside an
-image. For example, an image containing `discord.gg/example` is parsed, the
-invite is resolved through Discord, and its destination server ID is compared
-with the same global and per-server blocklists. The moderation alert includes
-the recognized text, invite code, and resolved server ID.
-
-The global blocklist is [malicious-servers.json](malicious-servers.json) at the
-repository root. Add one Discord server ID per JSON array entry:
-
-```json
-[
-  "123456789012345678",
-  "987654321098765432"
-]
-```
-
-The file is copied into the Docker image. Rebuild/redeploy the image after
-changing it. The `/setup malicious-servers add` command can also add a local
-entry for the current server without modifying the repository file.
-
-Manage it with:
-
-```text
-/setup malicious-servers protection enabled:true
-/setup malicious-servers add server-id:123456789012345678
-/setup malicious-servers remove server-id:123456789012345678
-/setup malicious-servers list
-```
-
-The enabled/disabled state and local entries are stored separately for each
-server and are shown in `/setup status`. Expired, deleted, or otherwise
-unavailable invites cannot be resolved and are left untouched.
-
-## NSFW server invite protection
-
-The bot can also inspect the public metadata returned for an invitation's
-destination server. It compares the server name, description, tags, and
-features against the keywords in
-[nsfw-server-keywords.json](nsfw-server-keywords.json), including terms such as
-`NSFW`, `+18`, `18+`, `🔞`, `squirt`, `sex`, `porn`, `xxx`, `adult`, `hentai`,
-and `onlyfans`. It also blocks Discord servers marked as age-restricted by
-Discord, even when the invite response does not include readable server text.
-Matching is case-insensitive and ignores accents.
-
-This protection is enabled by default and can be disabled per server with:
-
-```text
-/setup nsfw-servers protection enabled:false
-/setup nsfw-servers protection enabled:true
-```
-
-The keyword file is copied into the Docker image, so rebuild/redeploy the image
-after changing it. If the invitation has expired, is unavailable, or does not
-expose a server name, the NSFW-name check is skipped.
-
-Server admins can also:
-
-- Set a custom timeout with `/setup timeout`.
-- Exclude roles from detection with `/setup excluded-role add`, `/setup excluded-role remove`, and `/setup excluded-role list`.
-- Toggle whether server administrators are excluded with `/setup excluded-administrators enable` and `/setup excluded-administrators disable`.
-- Enable, disable, or change the sensitivity of anti-raid protection with `/setup anti-raid`.
-
-For example, an image containing `Withdrawal` near the top and `Succeeded`
-near the bottom is considered a match.
-
-The bot scans:
-
-- Images uploaded directly as Discord attachments.
-- Images and thumbnails displayed in Discord embeds generated from links.
-- Images and embeds contained in forwarded message snapshots.
-- Every image in a multi-image message.
-- Images sent inside threads, including recently created threads owned by the
-  sender.
-
-Each image is evaluated independently. If any single image contains a matching
-withdrawal keyword and payout keyword, the entire outer message is
-deleted and the user who sent or forwarded it is timed out when Discord allows
-it.
-
-If the match is an OCR, visual-hash, or known source-channel match and the
-message is from the author of a thread created within the last 10 minutes, the
-entire thread is deleted along with the offending message.
-
-You can also add a public easter egg response by dropping meme images into
-`easter-egg photos/`. The bot builds hash signatures from that folder and, when
-one of those images is detected, replies in the channel with `Jajaja, piqué.`
-in Spanish or `Hahaha I got it 😜` in English instead of moderating the
-message.
-
-Discord may generate a link preview shortly after the original message is
-created. The bot handles both new-message and message-update events so those
-delayed previews are scanned as well. A plain link that Discord does not
-convert into an image embed is not downloaded automatically.
-
-## Requirements
-
-- Node.js 20 or newer.
-
-## Discord permissions
-
-### OAuth2 scopes
-
-When generating the bot invitation in the Discord Developer Portal, select:
-
-- `bot` — adds the bot account to the server.
-- `applications.commands` — installs the `/setup` slash command. Discord
-  includes this scope by default when the `bot` scope is selected, but it
-  should remain enabled.
-
-### Bot permissions
-
-Grant the bot these permissions:
-
-| Permission | Where it is required | Purpose |
-| --- | --- | --- |
-| **View Channels** | Monitored channels and the moderation channel | Receives new messages and accesses the configured moderation channel. |
-| **Manage Messages** | Monitored channels | Deletes messages containing a matching image or raids. |
-| **Moderate Members** | Server-wide | Applies the configured timeout to the message author. |
-| **Send Messages** | Moderation channel | Sends moderation alerts. |
-| **Embed Links** | Moderation channel | Sends the formatted moderation report embed. |
-
-The combined permission integer for these five permissions is
-`1099511655424`. It can be entered in an OAuth2 bot invitation as the
-`permissions` value.
-
-The bot does not require **Administrator**, **Ban Members**, or **Kick
-Members**. Granting Administrator is not recommended.
-
-### Role hierarchy
-
-The bot's highest role must be above the roles of users it needs to time out.
-Discord does not allow the bot to time out:
-
-- The server owner.
-- Members with the **Administrator** permission.
-- Members whose highest role is equal to or above the bot's highest role.
-
-If the bot cannot apply a timeout because of role hierarchy or permissions, it
-still attempts to delete the message and records the timeout failure in the
-moderation alert.
-
-By default, messages from server administrators and the server owner are ignored
-completely. Use `/setup excluded-administrators disable` to scan them too. When
-administrator exclusion is disabled, Discord may still prevent the timeout, but
-the bot can still delete matching messages when it has permission.
-
-Members with an excluded role are also ignored completely. These exclusions
-apply to image moderation, anti-raid protection, and spam message protection.
-
-### Administrator permissions
-
-The person running `/setup moderation-channel`, `/setup paranoia`, or
-`/setup status` must have the **Manage Server** permission. The bot itself
-does not need Manage Server.
-
-### Gateway intent
-
-In the
-[Discord Developer Portal](https://discord.com/developers/applications), open
-the application, go to **Bot > Privileged Gateway Intents**, and enable
-**Message Content Intent**. Discord considers attachments part of message
-content; without this intent, the bot receives an empty attachment collection.
-
-## Installation
-
-```bash
-pnpm install
-cp .env.example .env
-```
-
-Set `DISCORD_TOKEN` in `.env`.
-
-## Running the bot
-
-```bash
-pnpm start
-```
-
-The first OCR run may download the English language data and take longer.
-The worker is reused for subsequent images.
-
-### Server configuration
-
-Server administrators with **Manage Server** can configure the bot with:
-
-- `/setup moderation-channel` to choose where alerts are sent.
-- `/setup paranoia` to set the per-server detection sensitivity.
-- `/setup timeout` to set the per-server timeout.
-- `/setup excluded-role ...` to manage ignored roles.
-- `/setup excluded-administrators ...` to include or exclude server administrators.
-- `/setup anti-raid` to enable or configure anti-raid protection.
-- `/setup bot-detection enabled:true` to include messages sent by bots in detection and moderation. This is disabled by default.
-- `/setup status` to review the current configuration.
-
-### Easter eggs
-
-Store the meme images you want the bot to recognize in `easter-egg photos/`.
-Run `pnpm build:easter-egg-photos` to regenerate
-`generated/easter-egg-photo-manifest.json`.
-
-## Docker
-
-The included image uses `node:22-alpine`, installs production dependencies
-only, and runs the bot as the non-root `node` user.
-
-Create the environment file before starting the container:
-
-```bash
-cp .env.example .env
-```
-
-Set `DISCORD_TOKEN` in `.env`, then build and start the bot:
-
-```bash
-docker compose up -d --build
-```
-
-View its logs:
-
-```bash
-docker compose logs -f bot
-```
-
-Stop the bot:
-
-```bash
-docker compose down
-```
-
-The Compose configuration creates two named volumes:
-
-- `bot-data` stores the per-server moderation channel configuration.
-- `bot-data` also stores the anonymous aggregate analytics counters when
-  `SEND_FEEDBACK` is enabled.
-- `ocr-cache` stores the downloaded Tesseract English language data.
-
-Both volumes survive container recreation and image upgrades. Running
-`docker compose down -v` deletes them, including the saved moderation channel
-configuration.
-
-### Ports
-
-No ports need to be exposed or published. The bot connects outward to the
-Discord Gateway over HTTPS and WebSocket connections. It does not run an HTTP
-server or accept inbound network traffic.
-
-The relevant Compose configuration intentionally contains no `ports` section:
-
-```yaml
-services:
-  bot:
-    build: .
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - bot-data:/app/data
-      - ocr-cache:/home/node/.cache/ppu-paddle-ocr
-```
-
-## Automatic deployment with GitHub Actions
-
-The workflow in `.github/workflows/deploy.yml` runs on every push to `main`
-and can also be started manually.
-
-It performs these steps:
-
-1. Installs dependencies and runs the test suite.
-2. Builds the Docker image.
-3. Publishes `latest` and commit-specific tags to GitHub Container Registry.
-4. Optionally connects to a server over SSH, pulls the exact commit image, and
-   restarts the bot with Docker Compose.
-
-The published image name is:
-
-```text
-ghcr.io/dh-555/spam-guard-bot
-```
-
-### Server preparation
-
-Install Docker Engine and the Docker Compose plugin on the destination server.
-Create the deployment directory and its environment file once:
-
-```bash
-sudo mkdir -p /opt/d5-spam-guard-bot
-sudo chown "$USER":"$USER" /opt/d5-spam-guard-bot
-cd /opt/d5-spam-guard-bot
-nano .env
-```
-
-The server-side `.env` must contain at least:
-
-```env
-DISCORD_TOKEN=your_real_bot_token
-```
-
-GitHub Actions deliberately does not overwrite this file.
-
-The SSH user must be able to run `docker` and `docker compose` without an
-interactive password prompt. No inbound application ports are required; only
-SSH access is needed for deployment.
-
-### GitHub Actions variables
-
-Create these variables under **Settings > Secrets and variables > Actions**:
-
-| Variable | Location | Required | Example |
-| --- | --- | --- | --- |
-| `ENABLE_DEPLOY` | Repository variable | Yes | `true` |
-| `DEPLOY_PATH` | Repository or `production` environment variable | No | `/opt/d5-spam-guard-bot` |
-| `DEPLOY_PORT` | Repository or `production` environment variable | No | `22` |
-
-If `ENABLE_DEPLOY` is not exactly `true`, the workflow still tests and
-publishes the image but skips the SSH deployment.
-
-### GitHub Actions secrets
-
-Create these secrets:
-
-| Secret | Purpose |
+| Permission | Used for |
 | --- | --- |
-| `DEPLOY_HOST` | Server hostname or IP address. |
-| `DEPLOY_USER` | SSH username. |
-| `DEPLOY_SSH_KEY` | Private SSH key used only for deployment. |
-| `GHCR_USERNAME` | GitHub username used by the server to pull the image. |
-| `GHCR_PULL_TOKEN` | Personal access token (classic) with `read:packages`. |
+| View Channels, Read Message History | Reading messages to scan them. |
+| Send Messages, Embed Links | Posting alerts. |
+| Attach Files | Attaching images to feedback reports. |
+| Manage Messages | Deleting spam. |
+| Manage Threads | Deleting threads that spammers create. |
+| Moderate Members | Timing out spammers. |
 
-The corresponding public SSH key must be added to
-`~/.ssh/authorized_keys` for `DEPLOY_USER`.
+Then, in **Server Settings > Roles**, drag the bot's role **above** every role
+it should be able to time out. Discord does not let a bot time out members
+whose highest role is above its own, administrators, or the server owner.
 
-For a private GHCR package, `GHCR_PULL_TOKEN` needs permission to read
-packages. If the package is made public, server-side registry authentication
-can be removed from the workflow.
+### 3. Create the moderation channel
 
-## Legal pages and GitHub Pages
+Create a channel that only moderators can see. The bot needs View Channel,
+Send Messages, and Embed Links there.
 
-The `docs/` directory contains a static legal site with:
+To copy IDs, turn on **User Settings > Advanced > Developer Mode**, then
+right-click a channel or role and select **Copy ID**.
 
-- Privacy Policy: `docs/privacy.html`
-- Terms of Service: `docs/terms.html`
-- Legal landing page: `docs/index.html`
+### 4. Configure
 
-To publish it with GitHub Pages:
+Copy `.env.example` to `.env` and set at least `DISCORD_TOKEN` and
+`MODERATION_CHANNEL_ID`. Check `EXCLUDED_ROLE_IDS` lists your team and
+moderator roles. See [Configuration](#configuration) for every setting.
 
-1. Open the repository on GitHub.
-2. Go to **Settings > Pages**.
-3. Under **Build and deployment**, select **Deploy from a branch**.
-4. Select the `main` branch and the `/docs` folder.
-5. Save the configuration.
+Keep `.env` private: it contains the bot token.
 
-The expected URLs are:
+### 5. Install and run
 
-```text
-https://dh-555.github.io/Anti-Mr-Scam-bot/
-https://dh-555.github.io/Anti-Mr-Scam-bot/privacy.html
-https://dh-555.github.io/Anti-Mr-Scam-bot/terms.html
+Requirements: Node.js 22 (CI tests with 22; `package.json` allows 20 or
+later) and pnpm 10, which Corepack provides. If Node.js is installed
+system-wide, `corepack enable` may need `sudo`.
+
+Memory: the OCR engine loads on the first image and then uses about 1.3 GB,
+peaking around 2.3 GB in testing. Give the bot at least 4 GB of RAM.
+
+```bash
+corepack enable
+pnpm install --prod --frozen-lockfile
+pnpm build:visual-references
+node src/index.js
 ```
 
-The included policies are project-specific templates, not legal advice. The
-person or organization operating the Bot should review them for the applicable
-jurisdiction and deployment practices.
+`pnpm install` prints `Ignored build scripts: onnxruntime-node`. This is
+expected. That script only downloads optional GPU (CUDA) files; the CPU files
+the bot uses ship with the package.
 
-## Discord setup
+`pnpm build:visual-references` fingerprints the images in `visual-references/`
+into `generated/visual-reference-manifest.json`. Run it again whenever that
+folder changes.
 
-After starting the bot, a server administrator can use Discord's native slash
-command interface:
+The first start downloads the OCR models into `~/.cache/ppu-paddle-ocr` of the
+user running the bot, so the host needs outbound HTTPS to huggingface.co (or
+github.com). Later starts use the cache.
+
+A successful start logs:
 
 ```text
-/setup moderation-channel channel:#moderation
+[Visual matching] Loaded 82 reference hash(es).
+Bot connected as YourBot#1234.
+Moderating "Your Server" (123456789012345678). Alerts go to #mod-alerts.
 ```
 
-Discord displays a channel picker for the `channel` option. The selection is
-saved separately for each server and persists across restarts in
-`data/settings.json`.
+If the moderation or feedback channel is missing, or the bot cannot post in
+it, the bot logs the reason and exits.
 
-Use `/setup status` to view the currently configured moderation channel. The
-commands require the **Manage Server** permission and their responses are only
-visible to the administrator who runs them.
+### 6. Keep it running
 
-Messages sent by bots are ignored by default. To include them in this server's
-detection and moderation flow, use `/setup bot-detection enabled:true`; matching
-messages are handled like any other detected message and deleted. Use
-`/setup bot-detection enabled:false` to disable it again.
+Use any process manager. With systemd on Linux, for example, run the bot as a
+dedicated user that owns the checkout and `.env`:
 
-If a moderation channel has not been configured yet, the bot still scans and
-moderates matching images. In that case, it deletes the message, applies the
-timeout when possible, and posts a short notice in the same channel telling
-admins to configure `/setup moderation-channel` for full alerts and details.
+```ini
+# /etc/systemd/system/spam-guard-bot.service
+[Unit]
+Description=Spam guard Discord bot
+After=network-online.target
+Wants=network-online.target
+# Stop retrying after 5 failed starts in an hour. See the note below.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+User=spamguard
+WorkingDirectory=/path/to/spam-guard-bot
+ExecStartPre=/usr/bin/node scripts/build-visual-reference-manifest.mjs
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Replace the user, the path, and `/usr/bin/node` (see `which node`). The bot
+reads `.env` from `WorkingDirectory`.
+
+Keep the restart limit, whichever process manager you use. Discord allows a
+bot 1,000 logins per 24 hours. If a bot goes over, Discord resets its token
+and the bot stops working until you set the new one. A bot that fails after
+logging in (for example, because `MODERATION_CHANNEL_ID` is wrong) and is
+restarted every few seconds reaches that limit in a few hours. With the limit
+above, systemd gives up after 5 attempts. Fix the cause, then run
+`sudo systemctl reset-failed spam-guard-bot` and start it again.
+
+Then run:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now spam-guard-bot
+journalctl -u spam-guard-bot -f
+```
+
+### Updating
+
+```bash
+git pull
+pnpm install --prod --frozen-lockfile
+pnpm build:visual-references
+# then restart the bot
+```
 
 ## Configuration
 
-| Variable | Required | Default |
+Only `DISCORD_TOKEN` and `MODERATION_CHANNEL_ID` are required. Everything else
+has the default shown. `.env.example` lists the same settings with comments.
+Restart the bot after changing any of them. An invalid value stops the bot at
+startup with an error naming the variable.
+
+### Channels
+
+| Variable | Default | What it does |
 | --- | --- | --- |
-| `DISCORD_TOKEN` | Yes | — |
-| `TIMEOUT_MINUTES` | No | `1440` (24 hours) |
-| `MAX_IMAGE_SIZE_MB` | No | `8` |
-| `MAX_IMAGE_PIXELS` | No | `16000000` |
-| `IMAGE_DOWNLOAD_TIMEOUT_MS` | No | `15000` |
-| `SEND_FEEDBACK` | No | `true` |
-| `VISUAL_REFERENCE_MANIFEST_PATH` | No | `generated/visual-reference-manifest.json` |
-| `VISUAL_MATCH_THRESHOLD` | No | `6` |
+| `DISCORD_TOKEN` | required | Bot token from the Developer Portal. |
+| `MODERATION_CHANNEL_ID` | required | Channel for moderation alerts. The bot only moderates the server this channel is in. |
+| `FEEDBACK_CHANNEL_ID` | empty (off) | When set, image and hiring-ad alerts get **False detection** and **Correct detection** buttons. Clicking one posts a copy of the case (message text, text read from the image, images, who clicked) to this channel, to collect mistakes for tuning. Can be the same as `MODERATION_CHANNEL_ID`. |
 
-Set `SEND_FEEDBACK=false` to disable sending detection feedback and manual spam
-reports to the central feedback channel. Moderation alerts in each server and
-the moderation actions themselves continue to work normally.
+### Who is never checked
 
-OCR uses the PP-OCRv6 Small model through `ppu-paddle-ocr` and caches its ONNX
-models under `/home/node/.cache/ppu-paddle-ocr` in Docker. The compose files
-persist that directory in the `ocr-cache` volume so models are downloaded only
-on the first run.
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `EXCLUDED_ROLE_IDS` | empty | Comma-separated role IDs. Members with any of these roles are skipped. |
+| `EXCLUDE_ADMINS` | `true` | Skips the server owner and members with the Administrator permission. |
+| `MODERATE_BOTS` | `false` | Also checks messages from other bots. Webhooks and the bot itself are never checked. |
 
-Reference images live in the repository under `visual-references/`. The build
-step hashes them with a perceptual hash and writes the manifest to
-`generated/visual-reference-manifest.json`. At runtime, the bot reads only that
-manifest. Lower thresholds are stricter; `0` means exact hash equality.
+### Punishment
 
-To regenerate the manifest locally:
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TIMEOUT_MINUTES` | `1440` (24 hours) | Timeout length for every automatic action. Maximum `40320` (28 days, the Discord limit). |
 
-```bash
-pnpm build:visual-references
-```
+### Protections
 
-With the current reference folder, startup logs should include:
+Each protection times out the author, deletes the message, and posts an alert.
 
-```text
-[Visual matching] Loaded 19 reference hash(es).
-```
+| Variable | Default | What it catches |
+| --- | --- | --- |
+| `ANTI_RAID_ENABLED` | `true` | One user posting the same message in several channels within a short time. All copies are deleted. |
+| `ANTI_RAID_LEVEL` | `medium` | `high`: 3 or more channels within 2 minutes. `medium`: 4 or more within 1 minute. `low`: every text channel within 1 minute. |
+| `SPAM_MESSAGES_ENABLED` | `true` | Messages containing a phrase from `spam-messages.json` (ignoring case, accents, and spacing), porn-related wording from `spam-description-patterns.json` (the word "NSFW" on its own is allowed), and any message from a user ID in `spam-users.json`. |
+| `BLOCKED_LINKS_ENABLED` | `true` | Links to the scam sites in `blocked-domains.json` and a few specific scam URLs, in message text or inside images. |
+| `MALICIOUS_INVITES_ENABLED` | `true` | Discord invites, in text or inside images, that lead to a server listed in `malicious-servers.json`. |
+| `NSFW_INVITES_ENABLED` | `true` | Invites to servers Discord marks as age-restricted, or whose name, description, or tag contains a keyword from `nsfw-server-keywords.json`. |
+| `TEXT_SCAM_ENABLED` | `true` | Hiring and recruitment ads. See [Hiring ads](#hiring-ads). |
 
-Discord limits timeouts to a maximum of 28 days.
+### Image scanning
+
+The bot checks every attached or embedded image, including forwarded ones. It
+first compares the image with the known scam images in `visual-references/`,
+then reads its text with OCR.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `IMAGE_SCAN_SENSITIVITY` | `high` | How much scam text the OCR must find. `low`: only blocked links or invites. `medium`: "Withdrawal", "Success", and "USDT". `high`: "Withdrawal" and either "Success" or "USDT". `extreme`: any one word such as "money", "bonus", or "casino" (too aggressive for most servers). Known scam images match at every level. |
+| `VISUAL_MATCH_THRESHOLD` | `6` | How closely an image must match a known scam image: how many of 64 fingerprint points may differ. Lower is stricter; `0` means near-identical. |
+| `MAX_IMAGE_SIZE_MB` | `8` | Larger images are skipped, not scanned. |
+| `MAX_IMAGE_PIXELS` | `16000000` | Images with more pixels are skipped. This protects the host from oversized image files. |
+| `IMAGE_DOWNLOAD_TIMEOUT_MS` | `15000` | Gives up downloading an image after this many milliseconds. |
+
+### !spamreport command
+
+Off by default. When on, a member with the Manage Messages permission can reply
+`!spamreport` to a message. The bot then times out its author, deletes it, and
+deletes identical messages from the same author in every channel within the
+lookback window. It replies with the result and deletes the command message.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `SPAM_REPORT_ENABLED` | `false` | Turns the command on. |
+| `SPAM_REPORT_TIMEOUT_MINUTES` | `10` | Timeout length for reported users. |
+| `SPAM_REPORT_LOOKBACK_MINUTES` | `60` | How far back to look for identical messages. Each 100 messages scanned per channel costs one Discord API request, so keep this short. |
+
+## Hiring ads
+
+`TEXT_SCAM_ENABLED` flags a message only when it contains all three of:
+
+1. **Recruitment intent:** "hiring", "recruiting", "looking for a developer"
+   (or engineer, designer, team members, co-founder), "join our team",
+   "paid role", "long-term project", "job opportunity", and similar.
+2. **A tech role or stack:** developer, engineer, AI, React, backend,
+   blockchain, and similar.
+3. **A contact request:** DM, message me, contact me, Telegram, WhatsApp,
+   portfolio, LinkedIn, CV.
+
+Plain "looking for" and "join" do not count as intent, so help requests such as
+"I'm looking for help with my React auth flow, can someone DM me?" and event
+invites such as "Join us for the hackathon, DM me" are not flagged. A post
+looking for hackathon team members with a contact request is flagged.
+
+The rule lives in `src/detection.js`. The cases it must and must not flag are
+in `test/detection.test.js`.
+
+## Good to know
+
+- **The bot never bans or kicks.** The worst it does is a timeout, which a
+  moderator can remove (right-click the member, then **Remove Timeout**), and
+  deleting the message.
+- **Deleted images are not kept.** Alerts include the message text and the
+  text read from the image, not the image itself.
+- **Quoting spam counts as spam.** A member who pastes a scam message or link
+  to ask "is this a scam?" is timed out like the spammer.
+- **Forum posts and new threads can be deleted whole.** If a message that
+  starts a thread or forum post matches, or its author posts a matching message
+  in their own thread within 10 minutes of creating it, the bot deletes the
+  whole thread, including other members' replies.
+- **Keep `MODERATE_BOTS=false` if another bot logs deleted messages.** With it
+  on, the bot deletes the logging bot's copies of spam.
+- **It only acts on new and edited messages.** It does not clean up old
+  messages, and it cannot see direct messages.
+- **Image floods are handled in order.** Images matching a known scam image
+  are removed right away. New images are read one at a time, about 0.3 seconds
+  each, so in a large image raid removal can lag behind by a minute or more.
+- **Alerts never ping anyone**, and the bot only posts in the moderation and
+  feedback channels (plus `!spamreport` replies, when enabled).
+- **Feedback buttons expire after 15 minutes.** The feedback copy re-downloads
+  the images from the deleted message, so it can fail if Discord has already
+  removed them.
+
+## Updating the lists
+
+The lists are JSON files in the repository root. Edit, commit, and restart the
+bot.
+
+| File | Contents |
+| --- | --- |
+| `blocked-domains.json` | Scam domains. |
+| `spam-messages.json` | Exact spam phrases. Multi-line messages can be pasted as-is. |
+| `spam-description-patterns.json` | Regular expressions for porn-related wording, such as "porn", "hentai", "OnlyFans", "nudes", and "sex video". Avoid patterns for words developers use, such as a bare "xxx" (a common placeholder) or "sex" (a common schema field). |
+| `spam-users.json` | User IDs whose every message is removed. |
+| `malicious-servers.json` | Server IDs whose invites are removed. |
+| `nsfw-server-keywords.json` | Keywords that mark an invited server as NSFW. |
+| `scam-image-channels.json` | Channel IDs known to host scam images. Images whose Discord URL points to one are removed without scanning. |
+| `visual-references/` | Known scam images. Run `pnpm build:visual-references` after changing this folder. |
 
 ## Tests
 
 ```bash
 pnpm test
 ```
+
+## Credits
+
+Based on [spam-guard-bot](https://github.com/DH-555/spam-guard-bot) by David,
+under the MIT License.

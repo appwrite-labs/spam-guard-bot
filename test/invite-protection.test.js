@@ -286,3 +286,34 @@ test("falls back to the invite welcome-screen description", async () => {
     "Exclusive 18+ Spaces",
   );
 });
+
+test("checks invites to servers with a welcome screen without recursing forever", async () => {
+  const { Client, Invite } = await import("discord.js");
+  const client = new Client({ intents: [] });
+  const inviteFor = (description) => new Invite(client, {
+    code: "community",
+    type: 0,
+    guild: {
+      id: "123456789012345678",
+      name: "Some Community Server",
+      description,
+      features: ["COMMUNITY", "WELCOME_SCREEN_ENABLED"],
+      nsfw_level: 0,
+      welcome_screen: {
+        description: "Welcome!",
+        welcome_channels: [{ channel_id: "223456789012345678", description: "Rules", emoji_id: null, emoji_name: "📜" }],
+      },
+    },
+    channel: { id: "223456789012345678", name: "general", type: 0 },
+  });
+
+  try {
+    for (const [description, expectedKeyword] of [["A friendly dev community", null], ["18+ NSFW memes", "nsfw"]]) {
+      client.fetchInvite = async () => inviteFor(description);
+      const result = await findNsfwInvite("https://discord.gg/community", createInviteResolver(client));
+      assert.equal(result?.keyword ?? null, expectedKeyword, description);
+    }
+  } finally {
+    await client.destroy();
+  }
+});

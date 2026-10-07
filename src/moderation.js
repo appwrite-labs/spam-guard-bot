@@ -1,4 +1,4 @@
-import { EmbedBuilder, PermissionFlagsBits, Routes } from "discord.js";
+import { EmbedBuilder, PermissionFlagsBits } from "discord.js";
 import { performance } from "node:perf_hooks";
 import {
   containsScamPhrase,
@@ -22,60 +22,14 @@ import { getRaidFingerprint, RaidTracker } from "./raid-protection.js";
 import { findSpamMessage, getMessageText } from "./spam-messages.js";
 import { isKnownSpamUser } from "./spam-users.js";
 import { createDetectionFeedback } from "./detection-feedback.js";
-import { findKnownScamImageChannel } from "./scam-image-channels.js";
+import { findKnownScamImageChannel, SCAM_IMAGE_CHANNELS } from "./scam-image-channels.js";
 import { OCR_EFFORTS } from "./ocr.js";
 import { escapeDiscordMarkdown, sanitizeLogText } from "./security.js";
-import { ANALYTICS_DETECTION_TYPES } from "./analytics.js";
 
 const REASON =
   "Image detected by moderation rules.";
 const RECENT_THREAD_WINDOW_MS = 10 * 60_000;
-const ANTI_NOVA_VOIDBOX_BOT_IDS = new Set([
-  "1532889830294552778",
-  "1501887716550512710",
-]);
-const ANTI_NOVA_VOIDBOX_ROASTS = Object.freeze({
-  en: [
-    "its last neuron just disconnected",
-    "more useful as a paperweight than a bot",
-    "replied with the charm of a soggy toaster",
-    "its algorithm has requested indefinite vacation",
-    "even a CAPTCHA has more personality",
-    "another digital noise alarm",
-    "the artificial intelligence is still looking for intelligence",
-    "it is still thinking; do not hold your breath",
-  ],
-  es: [
-    "su última neurona acaba de desconectarse",
-    "más útil como pisapapeles que como bot",
-    "ha respondido con el carisma de una tostadora mojada",
-    "su algoritmo ha pedido vacaciones indefinidas",
-    "hasta un captcha tiene más personalidad",
-    "otra alerta de ruido con patas digitales",
-    "la inteligencia artificial sigue buscando la inteligencia",
-    "se ha quedado pensando; no esperes demasiado",
-  ],
-});
-
-function antiNovaVoidBoxReason(locale, random = Math.random) {
-  const roasts = locale === "es" ? ANTI_NOVA_VOIDBOX_ROASTS.es : ANTI_NOVA_VOIDBOX_ROASTS.en;
-  const index = Math.floor(random() * roasts.length);
-  return `Anti-Nova & VoidBox: useless bot alarm — ${roasts[index]}`;
-}
-
-async function deleteAntiNovaVoidBoxMessage(message, locale) {
-  const reason = antiNovaVoidBoxReason(locale);
-  if (message.client?.rest && message.channelId && message.id) {
-    await message.client.rest.delete(
-      Routes.channelMessage(message.channelId, message.id),
-      { reason },
-    );
-    return reason;
-  }
-
-  await message.delete(reason);
-  return reason;
-}
+const ACTIONED_MESSAGE_TTL_MS = 10 * 60_000;
 
 function safeEmbedText(value, maxLength = 900) {
   return escapeDiscordMarkdown(truncateText(value, maxLength), maxLength);
@@ -107,27 +61,11 @@ function ocrDetectionMethod(locale, reasons) {
     : [t(locale, "moderation", "ocrKeywords")]);
 }
 
-function recordAnalytics(analytics, method, ...args) {
-  if (typeof analytics?.[method] !== "function") return;
-
-  try {
-    const result = analytics[method](...args);
-    if (result && typeof result.catch === "function") {
-      void result.catch((error) => {
-        console.warn(`[Analytics] Could not record ${method}:`, error);
-      });
-    }
-  } catch (error) {
-    console.warn(`[Analytics] Could not record ${method}:`, error);
-  }
-}
-
 async function findMatchingImage(
   message,
   config,
   ocrService,
   visualMatcher,
-  easterEggMatcher,
   paranoiaLevel,
   resolveInvite,
   maliciousGuildIds,
@@ -135,11 +73,10 @@ async function findMatchingImage(
     blockedLinkEnabled = true,
     nsfwServerEnabled = true,
     nsfwServerKeywords = NSFW_SERVER_KEYWORDS,
+    scamImageChannels = SCAM_IMAGE_CHANNELS,
   } = {},
 ) {
   const imageSources = getMessageImageSources(message);
-  const hasEasterEggMatcher =
-    easterEggMatcher && easterEggMatcher.references?.length > 0;
   const shouldCheckMaliciousInvites =
     typeof resolveInvite === "function" && maliciousGuildIds?.length > 0;
   const shouldCheckNsfwInvites =
@@ -152,7 +89,7 @@ async function findMatchingImage(
       source.url,
       ...(source.alternateUrls ?? []),
     ]
-      .map((url) => findKnownScamImageChannel(url))
+      .map((url) => findKnownScamImageChannel(url, scamImageChannels))
       .find(Boolean);
 
     if (knownScamImageChannel) {
@@ -237,24 +174,6 @@ async function findMatchingImage(
       const visualStartedAt = performance.now();
       const visualMatch = visualMatcher ? await visualMatcher.match(image) : null;
       const visualMs = performance.now() - visualStartedAt;
-
-      if (hasEasterEggMatcher) {
-        const easterEggStartedAt = performance.now();
-        const easterEggMatch = await easterEggMatcher.match(image);
-        const easterEggMs = performance.now() - easterEggStartedAt;
-
-        if (easterEggMatch) {
-          console.log(
-            `[Image analysis] ${sanitizeLogText(source.label)}: easter egg match "${sanitizeLogText(easterEggMatch.reference.label)}" ` +
-              `(download ${downloadMs.toFixed(0)} ms; hash ${easterEggMs.toFixed(0)} ms; total ${(performance.now() - analysisStartedAt).toFixed(0)} ms).`,
-          );
-          return {
-            source,
-            kind: "easterEgg",
-            easterEggMatch,
-          };
-        }
-      }
 
       // A visual hash match is terminal: delete it without running OCR.
       if (visualMatch) {
@@ -362,7 +281,7 @@ async function sendModerationAlert(
   deleteResult,
   timeoutResult,
   locale,
-  sendFeedback = true,
+  withFeedback = false,
 ) {
   const channel = await client.channels.fetch(moderationChannelId);
 
@@ -390,8 +309,6 @@ async function sendModerationAlert(
             safeEmbedText(match.knownScamImageChannel.name, 256),
             match.knownScamImageChannel.channelId,
           )
-      : match.kind === "easterEgg"
-        ? t(locale, "moderation", "easterEggMatch")
       : ocrDetectionMethod(locale, match.ocrReasons);
   const embed = new EmbedBuilder()
     .setColor(0xed4245)
@@ -445,7 +362,7 @@ async function sendModerationAlert(
     .setThumbnail(message.author.displayAvatarURL())
     .setTimestamp();
 
-  const feedback = sendFeedback && match.kind === "ocr"
+  const feedback = withFeedback && match.kind === "ocr"
     ? createDetectionFeedback(match, message)
     : null;
 
@@ -457,46 +374,7 @@ async function sendModerationAlert(
   });
 }
 
-async function sendFallbackNotice(message, locale) {
-  const channel = message.channel;
-
-  if (!channel?.isTextBased?.() || !channel.isSendable?.()) {
-    throw new Error(
-      "The channel where the message was deleted cannot receive fallback notices.",
-    );
-  }
-
-  await channel.send({
-    content: t(locale, "moderation", "fallbackNotice", message.author),
-    allowedMentions: { users: [message.author.id], roles: [], repliedUser: false },
-  });
-}
-
-async function sendAntiNovaVoidBoxLog(client, message, moderationChannelId, reason, locale) {
-  const channel = moderationChannelId
-    ? await client.channels.fetch(moderationChannelId)
-    : message.channel;
-  if (!channel?.isTextBased?.() || !channel.isSendable?.()) {
-    throw new Error("The Anti-Nova & VoidBox log channel is unavailable or cannot receive messages.");
-  }
-
-  await channel.send({
-    content: [
-      `🚨 **${t(locale, "moderation", "antiNovaVoidBoxLogTitle")}**`,
-      `${t(locale, "moderation", "antiNovaVoidBoxLogBot")}: ${safeEmbedText(message.author.tag ?? message.author.username ?? message.author.id, 128)} (${message.author.id})`,
-      `${t(locale, "moderation", "channel")}: <#${message.channelId}>`,
-      `${t(locale, "moderation", "antiNovaVoidBoxLogMessage")}: ${safeEmbedText(message.content || t(locale, "moderation", "emptyText"), 700)}`,
-      `${t(locale, "moderation", "antiNovaVoidBoxLogReason")}: ${reason}`,
-      ...(!moderationChannelId
-        ? [t(locale, "moderation", "antiNovaVoidBoxLogNoChannel")]
-        : []),
-    ].join("\n"),
-    allowedMentions: { parse: [] },
-  });
-}
-
-async function sendRaidAlert(client, message, entries, timeoutMs, moderationChannelId, locale) {
-  if (!moderationChannelId) return sendFallbackNotice(message, locale);
+async function sendRaidAlert(client, message, entries, timeoutResult, timeoutMs, moderationChannelId, locale) {
   const channel = await client.channels.fetch(moderationChannelId);
   if (!channel?.isTextBased() || !channel.isSendable()) throw new Error("The configured moderation channel is unavailable.");
   const deletedMessages = entries.map((entry) => `${entry.channelId}: ${entry.message.content || "(empty)"}`).join("\n");
@@ -507,31 +385,19 @@ async function sendRaidAlert(client, message, entries, timeoutMs, moderationChan
         { name: t(locale, "moderation", "user"), value: `${message.author} (\`${message.author.id}\`)` },
         { name: t(locale, "moderation", "channel"), value: entries.map((entry) => `<#${entry.channelId}>`).join(", ") },
         { name: t(locale, "moderation", "raidMessage"), value: safeEmbedText(deletedMessages, 4000) || "(empty)" },
-        { name: t(locale, "moderation", "timeout", Math.round(timeoutMs / 60_000)), value: "Applied" },
+        { name: t(locale, "moderation", "timeout", Math.round(timeoutMs / 60_000)), value: resultLabel(timeoutResult, locale) },
       ).setTimestamp()],
     allowedMentions: { parse: [] },
   });
 }
 
-async function sendEasterEggReply(message, locale) {
-  await message.reply({
-    content: t(locale, "moderation", "easterEggReply"),
-    allowedMentions: { repliedUser: false },
-  });
-}
-
-async function sendSpamAlert(client, message, spamMessage, timeoutResult, deleteResult, timeoutMs, moderationChannelId, locale, feedbackMatch = null, sendFeedback = true) {
-  if (!moderationChannelId) {
-    await sendFallbackNotice(message, locale);
-    return;
-  }
-
+async function sendSpamAlert(client, message, spamMessage, timeoutResult, deleteResult, timeoutMs, moderationChannelId, locale, feedbackMatch = null, withFeedback = false) {
   const channel = await client.channels.fetch(moderationChannelId);
   if (!channel?.isTextBased() || !channel.isSendable()) {
     throw new Error("The configured moderation channel is unavailable or cannot receive messages.");
   }
 
-  const feedback = sendFeedback && feedbackMatch
+  const feedback = withFeedback && feedbackMatch
     ? createDetectionFeedback(feedbackMatch, message)
     : null;
   await channel.send({
@@ -561,11 +427,6 @@ async function sendMaliciousServerAlert(
   recognizedText = null,
   detectionMethod = null,
 ) {
-  if (!moderationChannelId) {
-    await sendFallbackNotice(message, locale);
-    return;
-  }
-
   const channel = await client.channels.fetch(moderationChannelId);
   if (!channel?.isTextBased() || !channel.isSendable()) {
     throw new Error("The configured moderation channel is unavailable or cannot receive messages.");
@@ -613,11 +474,6 @@ async function sendNsfwServerAlert(
   locale,
   recognizedText = null,
 ) {
-  if (!moderationChannelId) {
-    await sendFallbackNotice(message, locale);
-    return;
-  }
-
   const channel = await client.channels.fetch(moderationChannelId);
   if (!channel?.isTextBased() || !channel.isSendable()) {
     throw new Error("The configured moderation channel is unavailable or cannot receive messages.");
@@ -658,20 +514,15 @@ async function sendNsfwServerAlert(
   });
 }
 
-function shouldIgnoreMember(message, member, settingsStore) {
-  const excludedRoleIds = settingsStore.getExcludedRoleIds(message.guildId);
-  const excludedAdministrators =
-    settingsStore.getExcludedAdministrators(message.guildId);
+function shouldIgnoreMember(message, member, config) {
   const hasAdministratorBypass =
     message.guild.ownerId === message.author.id ||
     member.permissions.has(PermissionFlagsBits.Administrator);
-  const hasExcludedRole = excludedRoleIds.some((roleId) =>
+  const hasExcludedRole = config.excludedRoleIds.some((roleId) =>
     member.roles?.cache?.has?.(roleId),
   );
 
-  return (
-    (excludedAdministrators && hasAdministratorBypass) || hasExcludedRole
-  );
+  return (config.excludeAdmins && hasAdministratorBypass) || hasExcludedRole;
 }
 
 async function timeoutMember(guild, member, timeoutMs, reason, locale) {
@@ -852,16 +703,50 @@ export function createMessageHandler({
   client,
   config,
   ocrService,
-  settingsStore,
   visualMatcher,
-  easterEggMatcher,
   maliciousGuildIds = [],
   nsfwServerKeywords = NSFW_SERVER_KEYWORDS,
-  analytics = null,
+  scamImageChannels = SCAM_IMAGE_CHANNELS,
 }) {
   const raidTracker = new RaidTracker();
   const resolveInvite = createInviteResolver(client);
-  return async function handleMessage(message) {
+  const withFeedback = Boolean(config.feedbackChannelId);
+  // Discord sends an update right after a message is created when it adds
+  // link previews, so the same message can arrive twice. Handle one message
+  // at a time and skip messages already acted on, so spam is punished and
+  // reported once.
+  const inFlight = new Map();
+  const actioned = new Map();
+
+  function pruneActioned(now) {
+    for (const [messageId, expiresAt] of actioned) {
+      if (expiresAt > now) break;
+      actioned.delete(messageId);
+    }
+  }
+
+  async function handleMessage(message) {
+    const previous = inFlight.get(message.id);
+    const run = (async () => {
+      if (previous) await previous;
+      pruneActioned(Date.now());
+      if (actioned.has(message.id)) return;
+      if (await processMessage(message)) {
+        actioned.set(message.id, Date.now() + ACTIONED_MESSAGE_TTL_MS);
+      }
+    })();
+    const settled = run.catch(() => {});
+    inFlight.set(message.id, settled);
+
+    try {
+      return await run;
+    } finally {
+      if (inFlight.get(message.id) === settled) inFlight.delete(message.id);
+    }
+  }
+
+  // Returns true when the message was acted on.
+  async function processMessage(message) {
     if (!message.inGuild() || message.webhookId) {
       return;
     }
@@ -871,24 +756,7 @@ export function createMessageHandler({
       return;
     }
 
-    const antiNovaVoidBox = settingsStore.getAntiNovaVoidBox?.(message.guildId) ?? { enabled: false };
-    if (
-      antiNovaVoidBox.enabled &&
-      ANTI_NOVA_VOIDBOX_BOT_IDS.has(message.author.id)
-    ) {
-      const locale = resolveLocale(message.guild);
-      const reason = await deleteAntiNovaVoidBoxMessage(message, locale);
-      const moderationChannelId = settingsStore.getModerationChannelId?.(message.guildId);
-      try {
-        await sendAntiNovaVoidBoxLog(client, message, moderationChannelId, reason, locale);
-      } catch (error) {
-        console.error("[Anti-Nova & VoidBox] Could not send the moderation log:", error);
-      }
-      return;
-    }
-
-    const botDetection = settingsStore.getBotDetection?.(message.guildId) ?? { enabled: false };
-    if (message.author.bot && !botDetection.enabled) {
+    if (message.author.bot && !config.moderateBots) {
       return;
     }
 
@@ -906,25 +774,13 @@ export function createMessageHandler({
       }
     }
 
-    if (shouldIgnoreMember(message, member, settingsStore)) {
+    if (shouldIgnoreMember(message, member, config)) {
       return;
     }
 
-    const moderationChannelId = settingsStore.getModerationChannelId(
-      message.guildId,
-    );
-    const paranoiaLevel = settingsStore.getParanoiaLevel(message.guildId);
-    const timeoutMs = settingsStore.getTimeoutMs(message.guildId) ?? config.timeoutMs;
-    const raid = settingsStore.getRaidProtection?.(message.guildId) ?? { enabled: true, level: "high" };
-    const spam = settingsStore.getSpamProtection?.(message.guildId) ?? { enabled: true };
-    const maliciousServer = settingsStore.getMaliciousServerProtection?.(message.guildId) ?? {
-      enabled: true,
-      blockedGuildIds: [],
-    };
-    const nsfwServer = settingsStore.getNsfwServerProtection?.(message.guildId) ?? {
-      enabled: true,
-    };
-    const blockedLinkProtection = settingsStore.getBlockedLinkProtection?.(message.guildId) ?? { enabled: true };
+    const { moderationChannelId, timeoutMs } = config;
+    const paranoiaLevel = config.imageScanSensitivity;
+    const blockedGuildIds = config.maliciousInvitesEnabled ? maliciousGuildIds : [];
     const locale = resolveLocale(message.guild);
     const threadTitle = getThreadTitle(message);
     const messageText = getMessageText(message);
@@ -932,9 +788,8 @@ export function createMessageHandler({
       .filter((value) => typeof value === "string" && value.length > 0)
       .join("\n");
 
-    const blockedLink = blockedLinkProtection.enabled ? findBlockedLink(messageText) : null;
+    const blockedLink = config.blockedLinksEnabled ? findBlockedLink(messageText) : null;
     if (blockedLink) {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "blockedLink");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message, member, timeoutMs, "Blocked link protection triggered.", locale,
       );
@@ -952,36 +807,32 @@ export function createMessageHandler({
       } catch (error) {
         console.error("[Blocked links] Could not send the notification:", error);
       }
-      return;
+      return true;
     }
 
-    const suspiciousText = findSuspiciousText(
-      [messageText, threadTitle].filter(Boolean).join("\n"),
-      settingsStore.getTextScamProtection?.(message.guildId),
-      message.author.createdTimestamp,
-    );
+    const suspiciousText = config.textScamEnabled
+      ? findSuspiciousText(messageAndThreadTitle)
+      : null;
     if (suspiciousText) {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "textScam");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message, member, timeoutMs, "Suspicious scam advertisement detected.", locale,
       );
       try {
-        await sendSpamAlert(client, message, suspiciousText, timeoutResult, deleteResult, timeoutMs, moderationChannelId, locale, { text: messageText }, config.sendFeedback !== false);
+        await sendSpamAlert(client, message, suspiciousText, timeoutResult, deleteResult, timeoutMs, moderationChannelId, locale, { text: messageText }, withFeedback);
       } catch (error) {
         console.error("[Text scam protection] Could not send the notification:", error);
       }
-      return;
+      return true;
     }
 
-    if (maliciousServer.enabled) {
+    if (blockedGuildIds.length > 0) {
       const maliciousInvite = await findMaliciousInvite(
         messageAndThreadTitle,
-        [...maliciousGuildIds, ...maliciousServer.blockedGuildIds],
+        blockedGuildIds,
         resolveInvite,
       );
 
       if (maliciousInvite) {
-        recordAnalytics(analytics, "recordDetection", message.guildId, "maliciousServerInvite");
         const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
           message, member, timeoutMs, "Malicious server invite protection triggered.", locale,
         );
@@ -1000,11 +851,11 @@ export function createMessageHandler({
         } catch (error) {
           console.error("[Malicious server protection] Could not send the notification:", error);
         }
-        return;
+        return true;
       }
     }
 
-    if (nsfwServer.enabled) {
+    if (config.nsfwInvitesEnabled) {
       const nsfwInvite = await findNsfwInvite(
         messageAndThreadTitle,
         resolveInvite,
@@ -1012,7 +863,6 @@ export function createMessageHandler({
       );
 
       if (nsfwInvite) {
-        recordAnalytics(analytics, "recordDetection", message.guildId, "nsfwServerInvite");
         const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
           message, member, timeoutMs, "NSFW server invite protection triggered.", locale,
         );
@@ -1031,39 +881,39 @@ export function createMessageHandler({
         } catch (error) {
           console.error("[NSFW server protection] Could not send the notification:", error);
         }
-        return;
+        return true;
       }
     }
 
-    if (raid.enabled) {
+    if (config.antiRaidEnabled) {
       const imageSources = getMessageImageSources(message);
+      const raidLevel = config.antiRaidLevel;
       const raidEntries = raidTracker.record({
         guildId: message.guildId, userId: message.author.id, channelId: message.channelId,
-        content: message.content, fingerprint: getRaidFingerprint(message, imageSources), message, level: raid.level,
-        requiredChannels: raid.level === "low"
+        content: message.content, fingerprint: getRaidFingerprint(message, imageSources), message, level: raidLevel,
+        requiredChannels: raidLevel === "low"
           ? message.guild.channels.cache.filter((channel) => channel.isTextBased()).size
           : null,
       });
       if (raidEntries) {
-        recordAnalytics(analytics, "recordDetection", message.guildId, "raid");
-        const timeoutResult = await Promise.allSettled([
+        const [timeoutResult] = await Promise.allSettled([
           timeoutMember(message.guild, member, timeoutMs, "Anti-raid protection triggered.", locale),
         ]);
-        const deleteResults = await Promise.allSettled(
+        await Promise.allSettled(
           raidEntries.map((entry) => deleteMessageAndSingleMessageThread(entry.message)),
         );
-        try { await sendRaidAlert(client, message, raidEntries, timeoutMs, moderationChannelId, locale); }
+        try { await sendRaidAlert(client, message, raidEntries, timeoutResult, timeoutMs, moderationChannelId, locale); }
         catch (error) { console.error("[Anti-raid] Could not send the notification:", error); }
-        return;
+        return true;
       }
     }
 
-    const spamText = messageText;
-    const spamMessage = isKnownSpamUser(message.author.id)
-      ? "Known spam user"
-      : spam.enabled ? findSpamMessage(spamText) : null;
+    const spamMessage = !config.spamMessagesEnabled
+      ? null
+      : isKnownSpamUser(message.author.id)
+        ? "Known spam user"
+        : findSpamMessage(messageAndThreadTitle);
     if (spamMessage) {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "spamMessage");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message, member, timeoutMs, "Spam message protection triggered.", locale,
       );
@@ -1072,7 +922,7 @@ export function createMessageHandler({
       } catch (error) {
         console.error("[Spam protection] Could not send the notification:", error);
       }
-      return;
+      return true;
     }
 
     if (getMessageImageSources(message).length === 0) return;
@@ -1082,16 +932,14 @@ export function createMessageHandler({
       config,
       ocrService,
       visualMatcher,
-      easterEggMatcher,
       paranoiaLevel,
       resolveInvite,
-      maliciousServer.enabled
-        ? [...maliciousGuildIds, ...maliciousServer.blockedGuildIds]
-        : [],
+      blockedGuildIds,
       {
-        blockedLinkEnabled: blockedLinkProtection.enabled,
-        nsfwServerEnabled: nsfwServer.enabled,
+        blockedLinkEnabled: config.blockedLinksEnabled,
+        nsfwServerEnabled: config.nsfwInvitesEnabled,
         nsfwServerKeywords,
+        scamImageChannels,
       },
     );
 
@@ -1099,18 +947,7 @@ export function createMessageHandler({
       return;
     }
 
-    if (match.kind === "easterEgg") {
-      try {
-        await sendEasterEggReply(message, locale);
-      } catch (error) {
-        console.error("[Moderation] Could not send the easter egg reply:", error);
-      }
-
-      return;
-    }
-
     if (match.kind === "blockedLink") {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "blockedLink");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message,
         member,
@@ -1133,11 +970,10 @@ export function createMessageHandler({
       } catch (error) {
         console.error("[Blocked links] Could not send the image notification:", error);
       }
-      return;
+      return true;
     }
 
     if (match.kind === "maliciousServerInvite") {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "imageMaliciousServerInvite");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message,
         member,
@@ -1162,11 +998,10 @@ export function createMessageHandler({
       } catch (error) {
         console.error("[Malicious server protection] Could not send the notification:", error);
       }
-      return;
+      return true;
     }
 
     if (match.kind === "nsfwServerInvite") {
-      recordAnalytics(analytics, "recordDetection", message.guildId, "nsfwServerInvite");
       const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
         message,
         member,
@@ -1190,40 +1025,30 @@ export function createMessageHandler({
       } catch (error) {
         console.error("[NSFW server protection] Could not send the image notification:", error);
       }
-      return;
+      return true;
     }
 
     const { timeoutResult, deleteResult } = await timeoutThenDeleteMessage(
       message, member, timeoutMs, REASON, locale,
     );
 
-    const analyticsType = {
-      ocr: "imageOcr",
-      visual: "imageVisual",
-      knownScamImageChannel: "imageKnownChannel",
-    }[match.kind];
-    if (ANALYTICS_DETECTION_TYPES.includes(analyticsType)) {
-      recordAnalytics(analytics, "recordDetection", message.guildId, analyticsType);
-    }
-
     try {
-      if (moderationChannelId) {
-        await sendModerationAlert(
-          client,
-          message,
-          match,
-          timeoutMs,
-          moderationChannelId,
-          deleteResult,
-          timeoutResult,
-          locale,
-          config.sendFeedback !== false,
-        );
-      } else {
-        await sendFallbackNotice(message, locale);
-      }
+      await sendModerationAlert(
+        client,
+        message,
+        match,
+        timeoutMs,
+        moderationChannelId,
+        deleteResult,
+        timeoutResult,
+        locale,
+        withFeedback,
+      );
     } catch (error) {
       console.error("[Moderation] Could not send the notification:", error);
     }
-  };
+    return true;
+  }
+
+  return handleMessage;
 }

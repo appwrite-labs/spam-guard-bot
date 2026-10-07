@@ -105,6 +105,9 @@ function getNsfwServerMetadata(invite) {
     invite?.guild,
   ];
   const textValues = [];
+  // discord.js structures point back at each other (a welcome screen holds
+  // its guild, which holds the welcome screen), so skip objects already seen.
+  const seen = new WeakSet();
 
   const visit = (value) => {
     if (typeof value === "string") {
@@ -112,17 +115,20 @@ function getNsfwServerMetadata(invite) {
       return;
     }
 
+    if (!value || typeof value !== "object" || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
     }
 
-    if (value && typeof value === "object") {
-      // The selected roots above are already limited to server metadata.
-      // Discord may nest tag/emoji text under generic keys such as `value`,
-      // so inspect every nested value instead of relying on field names.
-      for (const item of Object.values(value)) visit(item);
-    }
+    // The selected roots above are already limited to server metadata.
+    // Discord may nest tag/emoji text under generic keys such as `value`,
+    // so inspect every nested value instead of relying on field names.
+    for (const item of Object.values(value)) visit(item);
   };
 
   for (const value of metadata) visit(value);

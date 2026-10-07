@@ -131,29 +131,35 @@ test("limits the text included in the moderation alert", () => {
   assert.equal(truncateText("123456", 5), "1234…");
 });
 
-test("detects identity and account scam advertisements by signal combinations", () => {
-  assert.match(findSuspiciousText("USA profile, SSN & U.S. ID / DL, KYC verification, Upwork profile setup and remote job interview"), /identity/i);
-  assert.equal(findSuspiciousText("I work remotely as a developer"), null);
+test("detects hiring and recruitment advertisements", () => {
+  const ads = [
+    "We're hiring a frontend developer, check our LinkedIn",
+    "Looking for a senior full-stack developer for a long-term project, DM me",
+    "Hiring React devs, paid, message me",
+    "We are recruiting AI engineers. Send your CV",
+    "Looking for team members for an AI startup, DM me",
+    "Join our team! We need a backend engineer, contact me",
+    "Hello everyone, I'm looking for an experienced blockchain developer. Please DM me",
+  ];
+
+  for (const ad of ads) {
+    assert.match(findSuspiciousText(ad) ?? "", /recruitment/i, ad);
+  }
 });
 
-test("detects remote-career services advertisements with verification and DM signals", () => {
-  const message = `
-    DEVELOPER & REMOTE CAREER SUPPORT
-    Professional guidance for developers, software engineers, freelancers & remote professionals.
-    CV, Portfolio & LinkedIn Optimization
-    Remote Job & Interview Support
-    Upwork / Fiverr Guidance
-    Bank Account & Deel Setup Guidance
-    KYC & Account Recovery Support
-    Background Check, Drug Test & Fingerprint Guidance
-    Discord: DM / Open a Ticket
-  `;
+test("does not flag help requests, event invites, or other community messages", () => {
+  const messages = [
+    "Hey, I'm looking for help with my React app auth flow, can someone DM me?",
+    "Looking for someone who knows the Appwrite database API, can you DM me?",
+    "Join us for the hackathon this weekend! Building with React + Appwrite cloud, DM me if you want to team up",
+    "Join our Appwrite office hours, we'll cover the database and cloud functions. DM me questions",
+    "Can you help us? Phone number login fails after GitHub OAuth",
+    "I'm a developer, my portfolio site uses Appwrite, account recovery emails never arrive. Asked on discord too",
+    "My team members can't access the database, DM me if you know why",
+    "Giving away a Sony camera and lens. First-come, first-served. DM if interested.",
+  ];
 
-  assert.match(findSuspiciousText(message), /remote-career/i);
-  assert.equal(findSuspiciousText(message, { remoteJobs: false }), null);
-});
-
-test("detects free-item giveaway lures requesting DMs", () => {
-  assert.match(findSuspiciousText("Giving away a Sony camera and lens. First-come, first-served. DM if interested."), /giveaway/i);
-  assert.equal(findSuspiciousText("I bought a camera yesterday"), null);
+  for (const message of messages) {
+    assert.equal(findSuspiciousText(message), null, message);
+  }
 });

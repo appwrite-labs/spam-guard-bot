@@ -63,7 +63,10 @@ whose highest role is above its own, administrators, or the server owner.
 ### 3. Create the moderation channel
 
 Create a channel that only moderators can see. The bot needs View Channel,
-Send Messages, and Embed Links there.
+Send Messages, and Embed Links there. If you set `FEEDBACK_CHANNEL_ID`, the
+bot also needs Attach Files in that channel, because feedback copies include
+the images. If either channel is a thread, the bot needs Send Messages in
+Threads instead of Send Messages.
 
 To copy IDs, turn on **User Settings > Advanced > Developer Mode**, then
 right-click a channel or role and select **Copy ID**.
@@ -112,8 +115,8 @@ Bot connected as YourBot#1234.
 Moderating "Your Server" (123456789012345678). Alerts go to #mod-alerts.
 ```
 
-If the moderation or feedback channel is missing, or the bot cannot post in
-it, the bot logs the reason and exits.
+If the moderation or feedback channel is missing, or the bot lacks a
+permission it needs there, the bot logs which one and exits.
 
 ### 6. Keep it running
 

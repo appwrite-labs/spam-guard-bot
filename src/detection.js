@@ -23,11 +23,22 @@ const EXTREME_KEYWORDS = [
   "BONUS",
   "BONUSES",
 ];
+// Words allowed between "looking for" and a role, such as "a senior
+// full-stack developer". Anything else, such as "help from a developer",
+// makes the phrase a help request rather than recruitment.
+const ROLE_QUALIFIER =
+  String.raw`(?:a|an|the|some|few|more|several|\d+|one|two|three|experienced|senior|junior|mid-level|lead|skilled|highly|talented|dedicated|passionate|reliable|motivated|qualified|professional|freelance|remote|full[- ]?time|part[- ]?time|full[- ]?stack|front[- ]?end|back[- ]?end|web|mobile|app|software|ai|ml|react|next\.?js|node(?:\.?js)?|python|typescript|javascript|rust|golang|java|blockchain|web3|solidity|ui\/?ux|devops|game|unity|flutter|native|ios|android|kotlin|swift|vue|angular|svelte|php|laravel|django|ruby|rails|cloud|data|crypto|defi|nft|technical)`;
+const RECRUITMENT_ROLE =
+  String.raw`(?:developers?|devs?|engineers?|designers?|programmers?|freelancers?|team\s*mates?|team\s+members?|co-?founders?)`;
+
 // A hiring or recruitment ad needs all three signals: recruitment intent, a
 // tech role or stack, and a request to make contact. Plain "looking for" or
 // "join" do not count as intent, so help requests and event invites pass.
 const RECRUITMENT_GROUPS = [
-  /\b(?:hiring|recruit(?:ing|ment|ers?)?|looking\s+for\s+(?:\S+\s+){0,3}?(?:developers?|devs?|engineers?|designers?|programmers?|freelancers?|team\s*mates?|team\s+members?|co-?founders?)|join\s+(?:my|our)\s+(?:team|startup)|(?:full|part)[- ]time\s+(?:role|position|job)|paid\s+(?:role|position|opportunity|collaboration|project)|long[- ]term\s+(?:collaboration|partnership|project|position|role)|job\s+(?:opening|opportunity|offer))\b/iu,
+  new RegExp(
+    String.raw`\b(?:hiring|recruit(?:ing|ment|ers?)?|looking\s+for\s+(?:${ROLE_QUALIFIER}[\s,]+){0,4}${RECRUITMENT_ROLE}|join\s+(?:my|our)\s+(?:team|startup)|(?:full|part)[- ]time\s+(?:role|position|job)|paid\s+(?:role|position|opportunity|collaboration|project)|long[- ]term\s+(?:collaboration|partnership|project|position|role)|job\s+(?:opening|opportunity|offer))\b`,
+    "iu",
+  ),
   /\b(?:developers?|devs?|engineers?|designers?|programmers?|hackathon|ai|artificial intelligence|full[- ]stack|frontend|backend|api|langgraph|crewai|react|next\.js|database|cloud|ui\/?ux|web3|blockchain)\b/iu,
   /\b(?:dms?|direct message|pm me|inbox me|message me|contact me|reach out|telegram|whatsapp|portfolio|linkedin|cv|resume)\b/iu,
 ];

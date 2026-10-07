@@ -140,6 +140,8 @@ test("detects hiring and recruitment advertisements", () => {
     "Looking for team members for an AI startup, DM me",
     "Join our team! We need a backend engineer, contact me",
     "Hello everyone, I'm looking for an experienced blockchain developer. Please DM me",
+    "Looking for highly skilled, experienced Web3 developers. DM me",
+    "looking for 2 React Native devs, telegram me",
   ];
 
   for (const ad of ads) {
@@ -150,6 +152,9 @@ test("detects hiring and recruitment advertisements", () => {
 test("does not flag help requests, event invites, or other community messages", () => {
   const messages = [
     "Hey, I'm looking for help with my React app auth flow, can someone DM me?",
+    "I'm looking for help from a developer with React auth, can someone DM me?",
+    "Looking for advice from an engineer about Appwrite cloud, DM me",
+    "Looking for feedback from frontend devs on my AI app, message me",
     "Looking for someone who knows the Appwrite database API, can you DM me?",
     "Join us for the hackathon this weekend! Building with React + Appwrite cloud, DM me if you want to team up",
     "Join our Appwrite office hours, we'll cover the database and cloud functions. DM me questions",

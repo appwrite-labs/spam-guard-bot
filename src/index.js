@@ -5,8 +5,8 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
-  PermissionFlagsBits,
 } from "discord.js";
+import { resolveAlertChannel } from "./alert-channels.js";
 import { loadConfig } from "./config.js";
 import { createMessageHandler } from "./moderation.js";
 import { MALICIOUS_GUILD_IDS } from "./malicious-servers.js";
@@ -19,12 +19,6 @@ import {
 } from "./visual-matching.js";
 import { handleDetectionFeedback } from "./detection-feedback.js";
 import { handleSpamReportMessage } from "./spam-report.js";
-
-const REQUIRED_CHANNEL_PERMISSIONS = [
-  PermissionFlagsBits.ViewChannel,
-  PermissionFlagsBits.SendMessages,
-  PermissionFlagsBits.EmbedLinks,
-];
 
 const config = loadConfig();
 const ocrService = new OcrService();
@@ -71,29 +65,6 @@ const handleMessage = createMessageHandler({
 // alerts never mix content from another server. Set once the client is ready.
 let moderatedGuildId = null;
 
-async function resolveAlertChannel(name, channelId) {
-  let channel;
-
-  try {
-    channel = await client.channels.fetch(channelId);
-  } catch (error) {
-    throw new Error(`${name} ${channelId} could not be fetched: ${error.message}`);
-  }
-
-  if (!channel?.isTextBased() || !channel.isSendable() || !channel.guild) {
-    throw new Error(`${name} ${channelId} is not a server text channel.`);
-  }
-
-  const botMember = channel.guild.members.me ?? await channel.guild.members.fetchMe();
-  if (!channel.permissionsFor(botMember)?.has(REQUIRED_CHANNEL_PERMISSIONS)) {
-    throw new Error(
-      `${name} ${channelId}: the bot needs View Channel, Send Messages, and Embed Links in #${channel.name}.`,
-    );
-  }
-
-  return channel;
-}
-
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Bot connected as ${readyClient.user.tag}.`);
   readyClient.user.setPresence({
@@ -103,11 +74,15 @@ client.once(Events.ClientReady, async (readyClient) => {
 
   try {
     const moderationChannel = await resolveAlertChannel(
+      readyClient,
       "MODERATION_CHANNEL_ID",
       config.moderationChannelId,
     );
     if (config.feedbackChannelId) {
-      await resolveAlertChannel("FEEDBACK_CHANNEL_ID", config.feedbackChannelId);
+      // Feedback and !spamreport copies attach the reported images.
+      await resolveAlertChannel(readyClient, "FEEDBACK_CHANNEL_ID", config.feedbackChannelId, {
+        withFiles: true,
+      });
     }
 
     moderatedGuildId = moderationChannel.guild.id;

@@ -12,24 +12,34 @@ test("does not match messages outside the list", () => {
   assert.equal(findSpamMessage("Free crypto giveaway!", ["free crypto giveaway now"]), null);
 });
 
-test("matches promotional NSFW descriptions but ignores negated NSFW rules", () => {
-  const rules = {
-    messages: [],
-    descriptionPatterns: ["\\bnsfw\\s+(?:content|gifs?)\\b"],
-    descriptionExclusions: ["\\bnsfw\\s+not\\s+allowed\\b"],
-  };
+test("removes porn-related wording but allows the word NSFW", () => {
+  const blocked = [
+    "Free porn here, check my bio",
+    "best p0rn collection dm me",
+    "Hot hentai server, join now",
+    "My OnlyFans link is in bio",
+    "send nudes",
+    "Leaked sex tape of a celebrity",
+    "xxx videos for free",
+    "naked pics in my profile",
+    "cam girls online now",
+  ];
+  const allowed = [
+    "How can I block NSFW content uploads in Appwrite Storage?",
+    "We need to filter nsfw memes from our community app",
+    "APPWRITE_API_KEY=xxx and project id xxx-xxx",
+    "My users collection has a sex attribute (male/female)",
+    "I live in Sussex, anyone else in the UK?",
+    "The design uses a nude color palette",
+    "Only fans of Svelte will get this joke",
+  ];
 
-  assert.ok(findSpamMessage("A server with NSFW content including 3000+ NSFW GIFs", rules));
-  assert.equal(findSpamMessage("NSFW not allowed here", rules), null);
-
-  assert.ok(findSpamMessage(
-    "Anime Empire is an Adult NSFW, Roleplay & Anime Community where all the weebs can unite!",
-    {
-      messages: [],
-      descriptionPatterns: ["\\badult\\s+nsfw\\b"],
-      descriptionExclusions: [],
-    },
-  ));
+  for (const message of blocked) {
+    assert.match(findSpamMessage(message) ?? "", /^Blocked wording: "/, message);
+  }
+  for (const message of allowed) {
+    assert.equal(findSpamMessage(message), null, message);
+  }
 });
 
 test("includes embed and forwarded snapshot descriptions", () => {

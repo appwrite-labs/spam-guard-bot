@@ -80,12 +80,12 @@ export function findSpamMessage(content, spamMessages = SPAM_MESSAGES, descripti
     return null;
   }
 
-  const matchedPattern = descriptionPatterns.find((pattern) =>
-    new RegExp(pattern, "u").test(normalizedContent),
-  );
+  for (const pattern of descriptionPatterns) {
+    const match = new RegExp(pattern, "u").exec(normalizedContent);
 
-  if (matchedPattern) {
-    return `Pattern: ${matchedPattern}`;
+    if (match) {
+      return `Blocked wording: "${match[0]}"`;
+    }
   }
 
   return null;

@@ -1,0 +1,25 @@
+# systemd service for the bot. scripts/install.sh fills in @BOT_DIR@ and
+# @NODE@ and copies the result to /etc/systemd/system/. Edit this file, not the
+# installed copy: every install or update overwrites the installed copy.
+
+[Unit]
+Description=Spam guard Discord bot
+After=network-online.target
+Wants=network-online.target
+# Discord resets a bot's token after 1,000 logins in 24 hours. Give up after
+# 5 failed starts in an hour instead of restarting a broken bot forever.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+WorkingDirectory=@BOT_DIR@
+ExecStartPre=@NODE@ scripts/build-visual-reference-manifest.mjs
+ExecStart=@NODE@ src/index.js
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

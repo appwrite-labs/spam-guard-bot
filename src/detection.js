@@ -23,29 +23,25 @@ const EXTREME_KEYWORDS = [
   "BONUS",
   "BONUSES",
 ];
-const IDENTITY_SCAM_GROUPS = [
-  /\b(?:usa|u\.s\.?|united states|us)\b/iu,
-  /\b(?:ssn|social security|id\s*\/\s*dl|driver'?s license|bank account|phone number|paypal|payoneer|wise|kyc|background check|fingerprint|drug test)\b/iu,
-  /\b(?:upwork|toptal|freelancer|github|linkedin|remote job|developer interview|interview caller|profile setup|account recovery)\b/iu,
+// Words allowed between "looking for" and a role, such as "a senior
+// full-stack developer". Anything else, such as "help from a developer",
+// makes the phrase a help request rather than recruitment.
+const ROLE_QUALIFIER =
+  String.raw`(?:a|an|the|some|few|more|several|\d+|one|two|three|experienced|senior|junior|mid-level|lead|skilled|highly|talented|dedicated|passionate|reliable|motivated|qualified|professional|freelance|remote|full[- ]?time|part[- ]?time|full[- ]?stack|front[- ]?end|back[- ]?end|web|mobile|app|software|ai|ml|react|next\.?js|node(?:\.?js)?|python|typescript|javascript|rust|golang|java|blockchain|web3|solidity|ui\/?ux|devops|game|unity|flutter|native|ios|android|kotlin|swift|vue|angular|svelte|php|laravel|django|ruby|rails|cloud|data|crypto|defi|nft|technical)`;
+const RECRUITMENT_ROLE =
+  String.raw`(?:developers?|devs?|engineers?|designers?|programmers?|freelancers?|team\s*mates?|team\s+members?|co-?founders?)`;
+
+// A hiring or recruitment ad needs all three signals: recruitment intent, a
+// tech role or stack, and a request to make contact. Plain "looking for" or
+// "join" do not count as intent, so help requests and event invites pass.
+const RECRUITMENT_GROUPS = [
+  new RegExp(
+    String.raw`\b(?:hiring|recruit(?:ing|ment|ers?)?|looking\s+for\s+(?:${ROLE_QUALIFIER}[\s,]+){0,4}${RECRUITMENT_ROLE}|join\s+(?:my|our)\s+(?:team|startup)|(?:full|part)[- ]time\s+(?:role|position|job)|paid\s+(?:role|position|opportunity|collaboration|project)|long[- ]term\s+(?:collaboration|partnership|project|position|role)|job\s+(?:opening|opportunity|offer))\b`,
+    "iu",
+  ),
+  /\b(?:developers?|devs?|engineers?|designers?|programmers?|hackathon|ai|artificial intelligence|full[- ]stack|frontend|backend|api|langgraph|crewai|react|next\.js|database|cloud|ui\/?ux|web3|blockchain)\b/iu,
+  /\b(?:dms?|direct message|pm me|inbox me|message me|contact me|reach out|telegram|whatsapp|portfolio|linkedin|cv|resume)\b/iu,
 ];
-const REMOTE_CAREER_SCAM_GROUPS = [
-  /\b(?:developer\w*|software engineer\w*|freelancer\w*|remote professional\w*)\b/iu,
-  /\b(?:cv|resume|portfolio|linkedin|upwork|fiverr|remote job|interview support)\b/iu,
-  /\b(?:bank account|deel|kyc|account recovery|background check|drug test|fingerprint|platform verification|identity verification)\b/iu,
-  /\b(?:discord|dm|direct message|ticket)\b/iu,
-];
-const GIVEAWAY_GROUPS = [
-  /\b(?:free|giveaway|giving away|gift|prize)\b/iu,
-  /\b(?:camera|sony|lens|console|iphone|laptop|drone)\b/iu,
-  /\b(?:first[- ]come|dm|direct message|contact me)\b/iu,
-];
-const AI_TEAM_RECRUITMENT_GROUPS = [
-  /\b(?:hiring|looking for|join|team members?|recruit(?:ing|ment)?|permanent|long[- ]term)\b/iu,
-  /\b(?:hackathon|ai|artificial intelligence|full[- ]stack|frontend|backend|api|langgraph|crewai|react|next\.js|database|cloud|ui\/?ux)\b/iu,
-  /\b(?:portfolio|linkedin|dm|direct message|contact me|message me)\b/iu,
-];
-export const DM_POLICIES = Object.freeze({ ALLOW: "allow", DENY: "deny", RECENT: "recent" });
-export const DEFAULT_TEXT_SCAM_SETTINGS = Object.freeze({ remoteJobs: true, giveaways: true, dmPolicy: DM_POLICIES.RECENT });
 export const PARANOIA_LEVELS = Object.freeze({
   LOW: "low",
   MEDIUM: "medium",
@@ -174,30 +170,12 @@ export function containsScamPhrase(text, paranoiaLevel = DEFAULT_PARANOIA_LEVEL)
   return findOcrDetectionReasons(text, paranoiaLevel).length > 0;
 }
 
-/** Detects high-signal scam advertisements in message text without relying on exact copies. */
-export function findSuspiciousText(text, settings = DEFAULT_TEXT_SCAM_SETTINGS, accountCreatedTimestamp = null) {
+/** Detects hiring and recruitment advertisements in message text. */
+export function findSuspiciousText(text) {
   if (typeof text !== "string" || !text.trim()) return null;
   const normalizedText = normalizeOcrText(text);
-  if (settings.remoteJobs !== false && AI_TEAM_RECRUITMENT_GROUPS.every((pattern) => pattern.test(normalizedText))) {
-    return "Potential team recruitment or hiring advertisement requesting portfolio/contact";
-  }
-  if (settings.remoteJobs !== false && IDENTITY_SCAM_GROUPS.every((pattern) => pattern.test(normalizedText))) {
-    return "Suspicious identity/account and remote-work services advertisement";
-  }
-  if (settings.remoteJobs !== false && REMOTE_CAREER_SCAM_GROUPS.every((pattern) => pattern.test(normalizedText))) {
-    return "Suspicious remote-career and account-services advertisement";
-  }
-  if (settings.giveaways === false) return null;
-  const hasFreeItem = GIVEAWAY_GROUPS.slice(0, 2).every((pattern) => pattern.test(normalizedText));
-  const hasUrgency = /\b(?:first[- ]come|dm|direct message|contact me)\b/iu.test(normalizedText);
-  const hasDm = /\b(?:dm|direct message)\b/iu.test(normalizedText);
-  // If the timestamp is unavailable, keep the conservative moderation behaviour.
-  const accountIsRecent = !Number.isFinite(accountCreatedTimestamp) || Date.now() - accountCreatedTimestamp < 7 * 24 * 60 * 60 * 1000;
-  const dmAllowed = settings.dmPolicy === DM_POLICIES.ALLOW ||
-    (settings.dmPolicy === DM_POLICIES.RECENT && (!hasDm || accountIsRecent)) ||
-    (settings.dmPolicy === DM_POLICIES.DENY && hasDm);
-  if (hasFreeItem && hasUrgency && dmAllowed) {
-    return "Suspicious free-item giveaway requesting direct contact";
+  if (RECRUITMENT_GROUPS.every((pattern) => pattern.test(normalizedText))) {
+    return "Hiring or recruitment advertisement requesting contact";
   }
   return null;
 }

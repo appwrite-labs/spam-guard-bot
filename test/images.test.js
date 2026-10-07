@@ -100,7 +100,7 @@ test("keeps trusted alternate URLs for proxied images", () => {
     embeds: [
       {
         image: {
-          url: "https://cdn.discordapp.com/attachments/740463504602955806/123456789012345678/scam.png",
+          url: "https://cdn.discordapp.com/attachments/111111111111111111/123456789012345678/scam.png",
           proxyURL: "https://images-ext-1.discordapp.net/external/proxy/scam.png",
         },
       },
@@ -110,11 +110,11 @@ test("keeps trusted alternate URLs for proxied images", () => {
   assert.deepEqual(getMessageImageSources(message), [
     {
       url: "https://images-ext-1.discordapp.net/external/proxy/scam.png",
-      label: "https://cdn.discordapp.com/attachments/740463504602955806/123456789012345678/scam.png",
+      label: "https://cdn.discordapp.com/attachments/111111111111111111/123456789012345678/scam.png",
       size: null,
       forwarded: false,
       alternateUrls: [
-        "https://cdn.discordapp.com/attachments/740463504602955806/123456789012345678/scam.png",
+        "https://cdn.discordapp.com/attachments/111111111111111111/123456789012345678/scam.png",
       ],
     },
   ]);

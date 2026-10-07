@@ -1,12 +1,11 @@
 {
   "patterns": [
-    "\\bnsfw\\s+(?:content|gifs?|memes?)\\b",
-    "\\badult\\s+nsfw\\b",
-    "\\b(?:porn|hentai|xxx|onlyfans)\\s+(?:content|gifs?|memes?|collection|server)\\b"
+    "\\b(?:porn\\w*|p0rn\\w*|pr0n|p\\*rn\\w*|youporn|hentai|h3ntai|[o0]nlyfans?|xvideos|xhamster|xnxx|redtube|brazzers|chaturbate|stripchat|sexting)\\b",
+    "\\bnudes\\b",
+    "\\b(?:nude|naked)\\s+(?:pics?|photos?|videos?|girls?)\\b",
+    "\\bsex\\s*(?:tapes?|videos?|cams?|chats?)\\b",
+    "\\bcam\\s*girls?\\b",
+    "\\bxxx\\s+(?:videos?|content|pics?|photos?|links?|sites?|servers?|collection)\\b"
   ],
-  "exclusions": [
-    "\\b(?:no|without)\\s+nsfw\\b",
-    "\\bnsfw\\s+(?:(?:is\\s+)?not\\s+allowed|prohibited|forbidden|banned)\\b",
-    "\\bnsfw\\s+(?:content|gifs?|memes?)\\s+(?:(?:is\\s+)?not\\s+allowed|prohibited|forbidden|banned)\\b"
-  ]
+  "exclusions": []
 }

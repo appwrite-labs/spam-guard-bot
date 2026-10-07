@@ -3,7 +3,4 @@ node_modules/
 .DS_Store
 coverage/
 *.log
-*.traineddata
-data/settings.json
-data/settings.json.tmp
 generated/

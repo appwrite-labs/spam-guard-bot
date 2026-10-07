@@ -4,26 +4,9 @@ import { resolveLocale, t } from "./i18n.js";
 import { getTrustedImageUrls } from "./images.js";
 import { escapeDiscordMarkdown, sanitizeLogText, sanitizeText } from "./security.js";
 
-export const FEEDBACK_CHANNEL_ID = "1523128007919796224";
-export const FEEDBACK_GUILD_ID = "1093301485347020941";
 const feedbacks = new Map();
 const FEEDBACK_TTL_MS = 15 * 60_000;
 const MAX_FEEDBACKS = 1_000;
-
-function recordFeedbackAnalytics(analytics, guildId, value) {
-  if (typeof analytics?.recordFeedback !== "function") return;
-
-  try {
-    const result = analytics.recordFeedback(guildId, value);
-    if (result && typeof result.catch === "function") {
-      void result.catch((error) => {
-        console.warn("[Analytics] Could not record feedback:", error);
-      });
-    }
-  } catch (error) {
-    console.warn("[Analytics] Could not record feedback:", error);
-  }
-}
 
 function pruneFeedbacks(now = Date.now()) {
   for (const [id, feedback] of feedbacks) {
@@ -67,14 +50,14 @@ export function createDetectionFeedback(match, message, locale = resolveLocale(m
   };
 }
 
-export async function handleDetectionFeedback(interaction, { sendFeedback = true } = {}, analytics = null) {
+export async function handleDetectionFeedback(interaction, { feedbackChannelId = null } = {}) {
   if (!interaction.isButton()) return false;
   const match = /^detection-feedback:(true|false):([0-9a-f-]{36})$/u.exec(interaction.customId);
   if (!match) return false;
   const [, value, id] = match;
   const locale = resolveLocale(interaction);
 
-  if (!sendFeedback) {
+  if (!feedbackChannelId) {
     await interaction.reply({ content: t(locale, "moderation", "feedbackDisabled"), ephemeral: true });
     return true;
   }
@@ -91,9 +74,9 @@ export async function handleDetectionFeedback(interaction, { sendFeedback = true
     return true;
   }
 
-  const channel = await interaction.client.channels.fetch(FEEDBACK_CHANNEL_ID);
-  if (!channel?.isTextBased() || !channel.isSendable() || channel.guildId !== FEEDBACK_GUILD_ID) {
-    throw new Error("The detection feedback channel is unavailable or belongs to another server.");
+  const channel = await interaction.client.channels.fetch(feedbackChannelId);
+  if (!channel?.isTextBased() || !channel.isSendable()) {
+    throw new Error("The detection feedback channel is unavailable or cannot receive messages.");
   }
 
   await channel.send({
@@ -103,16 +86,15 @@ export async function handleDetectionFeedback(interaction, { sendFeedback = true
       title: t(locale, "moderation", "feedbackTitle"),
       fields: [
         { name: t(locale, "moderation", "originalServerChannel"), value: `${feedback.guildId} / ${feedback.channelId}` },
-        { name: "Usuario", value: escapeDiscordMarkdown(feedback.authorTag, 128) + " (" + feedback.messageId + ")" },
+        { name: t(locale, "moderation", "user"), value: escapeDiscordMarkdown(feedback.authorTag, 128) + " (" + feedback.messageId + ")" },
         { name: t(locale, "moderation", "recognizedText"), value: escapeDiscordMarkdown(feedback.recognizedText, 1024) || "(empty)" },
-        { name: "Mensaje", value: escapeDiscordMarkdown(feedback.content, 1024) || "(empty)" },
+        { name: t(locale, "moderation", "message"), value: escapeDiscordMarkdown(feedback.content, 1024) || "(empty)" },
         { name: t(locale, "moderation", "reportedBy"), value: escapeDiscordMarkdown(interaction.user.tag, 128) + " (" + interaction.user.id + ")" },
       ],
     }],
     files: feedback.imageUrls.map((url) => ({ attachment: url })),
     allowedMentions: { parse: [] },
   });
-  recordFeedbackAnalytics(analytics, feedback.guildId, value);
   feedbacks.delete(id);
   await interaction.update({ components: [] });
   return true;

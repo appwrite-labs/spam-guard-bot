@@ -71,110 +71,105 @@ Threads instead of Send Messages.
 To copy IDs, turn on **User Settings > Advanced > Developer Mode**, then
 right-click a channel or role and select **Copy ID**.
 
-### 4. Configure
+### 4. Install on the server
 
-Copy `.env.example` to `.env` and set at least `DISCORD_TOKEN` and
-`MODERATION_CHANNEL_ID`. Check `EXCLUDED_ROLE_IDS` lists your team and
-moderator roles. See [Configuration](#configuration) for every setting.
-
-Keep `.env` private: it contains the bot token.
-
-### 5. Install and run
-
-Requirements: Node.js 22 (CI tests with 22; `package.json` allows 20 or
-later) and pnpm 10, which Corepack provides. If Node.js is installed
-system-wide, `corepack enable` may need `sudo`.
-
-Memory: the OCR engine loads on the first image and then uses about 1.3 GB,
-peaking around 2.3 GB in testing. Give the bot at least 4 GB of RAM.
+You need an Ubuntu or Debian server with at least 4 GB of RAM, logged in as
+root. Run:
 
 ```bash
-corepack enable
-pnpm install --prod --frozen-lockfile
-pnpm build:visual-references
-node src/index.js
+apt-get install -y git
+git clone https://github.com/appwrite-labs/spam-guard-bot.git /opt/spam-guard-bot
+/opt/spam-guard-bot/scripts/install.sh
 ```
 
-`pnpm install` prints `Ignored build scripts: onnxruntime-node`. This is
-expected. That script only downloads optional GPU (CUDA) files; the CPU files
-the bot uses ship with the package.
+The install script:
 
-`pnpm build:visual-references` fingerprints the images in `visual-references/`
-into `generated/visual-reference-manifest.json`. Run it again whenever that
-folder changes.
+1. Installs Node.js 22 and pnpm, if they are missing.
+2. Installs the bot's dependencies.
+3. Creates `/opt/spam-guard-bot/.env` from `.env.example` and asks you to
+   paste the bot token. The token stays hidden while you paste it.
+4. Installs and starts the `spam-guard-bot` service, which also starts the bot
+   whenever the server reboots.
+5. Shows the bot's first log lines.
 
-The first start downloads the OCR models into `~/.cache/ppu-paddle-ocr` of the
-user running the bot, so the host needs outbound HTTPS to huggingface.co (or
-github.com). Later starts use the cache.
+`.env.example` is already filled in for the Appwrite server. See
+[Configuration](#configuration) for every setting.
 
-A successful start logs:
+When the bot is running, the log lines include:
 
 ```text
-[Visual matching] Loaded 82 reference hash(es).
 Bot connected as YourBot#1234.
 Moderating "Your Server" (123456789012345678). Alerts go to #mod-alerts.
 ```
 
-If the moderation or feedback channel is missing, or the bot lacks a
-permission it needs there, the bot logs which one and exits.
+If the script says the bot is not running, the log lines below that message
+explain why, for example a missing channel permission. Fix it and run the
+script again. It is safe to run as often as you like: it skips steps that are
+already done and keeps your `.env`.
 
-### 6. Keep it running
+The first image the bot reads downloads about 30 MB of OCR models from
+huggingface.co, so the server needs internet access.
 
-Use any process manager. With systemd on Linux, for example, run the bot as a
-dedicated user that owns the checkout and `.env`:
+### 5. Check it works
 
-```ini
-# /etc/systemd/system/spam-guard-bot.service
-[Unit]
-Description=Spam guard Discord bot
-After=network-online.target
-Wants=network-online.target
-# Stop retrying after 5 failed starts in an hour. See the note below.
-StartLimitIntervalSec=1h
-StartLimitBurst=5
+From a test account that is not an admin and has none of the excluded roles,
+post this in any channel:
 
-[Service]
-User=spamguard
-WorkingDirectory=/path/to/spam-guard-bot
-ExecStartPre=/usr/bin/node scripts/build-visual-reference-manifest.mjs
-ExecStart=/usr/bin/node src/index.js
-Restart=on-failure
-RestartSec=30
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-
-[Install]
-WantedBy=multi-user.target
+```text
+Free crypto giveaway! Send crypto to receive double back.
 ```
 
-Replace the user, the path, and `/usr/bin/node` (see `which node`). The bot
-reads `.env` from `WorkingDirectory`.
+The message should disappear, the test account should be timed out, and an
+alert should appear in the moderation channel. Remove the test account's
+timeout afterwards: right-click it, then select **Remove Timeout**.
 
-Keep the restart limit, whichever process manager you use. Discord allows a
-bot 1,000 logins per 24 hours. If a bot goes over, Discord resets its token
-and the bot stops working until you set the new one. A bot that fails after
-logging in (for example, because `MODERATION_CHANNEL_ID` is wrong) and is
-restarted every few seconds reaches that limit in a few hours. With the limit
-above, systemd gives up after 5 attempts. Fix the cause, then run
-`sudo systemctl reset-failed spam-guard-bot` and start it again.
-
-Then run:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now spam-guard-bot
-journalctl -u spam-guard-bot -f
-```
+## Running the bot
 
 ### Updating
 
 ```bash
-git pull
-pnpm install --prod --frozen-lockfile
-pnpm build:visual-references
-# then restart the bot
+/opt/spam-guard-bot/scripts/update.sh
 ```
+
+This downloads the latest code, updates the dependencies, and restarts the bot.
+Your `.env` is kept.
+
+### Everyday commands
+
+| To | Run |
+| --- | --- |
+| Check the bot is running | `systemctl status spam-guard-bot` |
+| Watch the logs (Ctrl+C to stop watching) | `journalctl -u spam-guard-bot -f` |
+| Change a setting | `nano /opt/spam-guard-bot/.env`, then `systemctl restart spam-guard-bot` |
+| Restart the bot | `systemctl restart spam-guard-bot` |
+| Stop the bot | `systemctl stop spam-guard-bot` |
+
+### If the bot keeps failing to start
+
+After 5 failed starts in an hour, systemd stops restarting the bot. This
+protects the bot token: Discord resets a bot's token after 1,000 logins in 24
+hours. Fix the cause shown in the logs, then run
+`/opt/spam-guard-bot/scripts/install.sh` again, which also clears that limit.
+
+The service file is `deploy/spam-guard-bot.service`. Edit it there, not in
+`/etc/systemd/system/`: the install and update scripts overwrite the installed
+copy.
+
+### Running without the script
+
+On other systems, or to try the bot locally, install Node.js 22 and pnpm 10,
+then from the repository folder:
+
+```bash
+pnpm install --prod --frozen-lockfile
+cp .env.example .env   # then add DISCORD_TOKEN
+pnpm start
+```
+
+`pnpm install` prints `Ignored build scripts: onnxruntime-node`. This is
+expected: that script only downloads optional GPU files. If you run the bot
+under another process manager, limit how often it restarts, for the token
+reason above.
 
 ## Configuration
 
@@ -294,8 +289,8 @@ in `test/detection.test.js`.
 
 ## Updating the lists
 
-The lists are JSON files in the repository root. Edit, commit, and restart the
-bot.
+The lists are JSON files in the repository root. Edit them in a pull request,
+merge it, then run `/opt/spam-guard-bot/scripts/update.sh` on the server.
 
 | File | Contents |
 | --- | --- |
@@ -306,7 +301,7 @@ bot.
 | `malicious-servers.json` | Server IDs whose invites are removed. |
 | `nsfw-server-keywords.json` | Keywords that mark an invited server as NSFW. |
 | `scam-image-channels.json` | Channel IDs known to host scam images. Images whose Discord URL points to one are removed without scanning. |
-| `visual-references/` | Known scam images. Run `pnpm build:visual-references` after changing this folder. |
+| `visual-references/` | Known scam images. The bot fingerprints them each time it starts. |
 
 ## Tests
 

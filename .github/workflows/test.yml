@@ -31,3 +31,6 @@ jobs:
 
       - name: Run tests
         run: pnpm test
+
+      - name: Check shell scripts
+        run: shellcheck scripts/*.sh
